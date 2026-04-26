@@ -35,4 +35,4 @@ endpoints:
       port: 8010
     type: GRPC
     networkVisibilities:
-      - Public
+      - Project
