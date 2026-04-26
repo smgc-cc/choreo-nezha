@@ -33,6 +33,6 @@ endpoints:
     service:
       basePath: /
       port: 8010
-    type: gRPC
+    type: GRPC
     networkVisibilities:
       - Public
