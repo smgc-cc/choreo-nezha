@@ -1,0 +1,2 @@
+# 每2小时备份一次数据到 R2
+0 */2 * * * /dashboard/backup.sh backup >> /tmp/backup.log 2>&1
