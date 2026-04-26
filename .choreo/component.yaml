@@ -3,11 +3,12 @@
 
 schemaVersion: 1.2
 
-# Choreo 不支持 REST 和 WebSocket endpoint 共用同一端口。
-# Nezha 自身在 8008 上同时支持 HTTP + WebSocket + gRPC，但 Choreo 网关层要求协议分端口声明。
-# 因此这里暴露：
+# Choreo 网关层按 endpoint 协议转发，不适合把 REST/WS/gRPC 混在同一端口暴露。
+# Nezha 自身在 8008 上同时支持 HTTP + WebSocket + gRPC，这里用 Caddy 将 Choreo 要求的分协议端口
+# 代理回 Nezha 的 8008：
 # - 8008: REST/HTTP Dashboard
-# - 8009: WS endpoint，容器内由 Caddy 代理回 127.0.0.1:8008
+# - 8009: WS endpoint，Caddy 代理回 127.0.0.1:8008
+# - 8010: gRPC endpoint，Caddy 通过 h2c 代理回 127.0.0.1:8008
 endpoints:
   - name: nezha
     displayName: Nezha Dashboard
@@ -24,5 +25,14 @@ endpoints:
       basePath: /
       port: 8009
     type: WS
+    networkVisibilities:
+      - Public
+
+  - name: nezha_grpc
+    displayName: Nezha gRPC
+    service:
+      basePath: /
+      port: 8010
+    type: gRPC
     networkVisibilities:
       - Public
