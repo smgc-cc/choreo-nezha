@@ -56,6 +56,6 @@ RUN chmod +x /dashboard/*.sh
 # 切换到 Choreo 指定用户 (10000-20000 范围)
 USER 10014
 
-EXPOSE 8008 8009
+EXPOSE 8008 8009 8010
 
 CMD ["/dashboard/entrypoint.sh"]
