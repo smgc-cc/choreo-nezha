@@ -47,7 +47,13 @@ echo "Restoring backup if available..."
 /dashboard/backup.sh restore
 
 # ==============================
-# 5. 启动主应用
+# 5. 启动 Caddy WebSocket 代理
+# ==============================
+echo "Starting Caddy WebSocket proxy on port 8009..."
+caddy run --config /dashboard/Caddyfile --adapter caddyfile &
+
+# ==============================
+# 6. 启动主应用
 # ==============================
 echo "Starting Nezha Dashboard..."
 echo "Database: $DB_FILE"

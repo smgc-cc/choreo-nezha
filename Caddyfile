@@ -1,0 +1,6 @@
+:8009 {
+    reverse_proxy 127.0.0.1:8008 {
+        header_up Host {http.reverse_proxy.upstream.hostport}
+        header_up -Origin
+    }
+}
