@@ -4,3 +4,9 @@
         header_up -Origin
     }
 }
+
+:8010 {
+    reverse_proxy h2c://127.0.0.1:8008 {
+        header_up Host {http.reverse_proxy.upstream.hostport}
+    }
+}
