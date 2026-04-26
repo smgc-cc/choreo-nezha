@@ -1,0 +1,19 @@
+# Choreo Component Configuration
+# 详细文档: https://wso2.com/choreo/docs/develop-components/configure-endpoints/
+
+schemaVersion: 1.2
+
+# 端点配置
+endpoints:
+  # HTTP 端点（Dashboard 前端 + REST API）
+  - name: nezha
+    displayName: Nezha Dashboard
+    service:
+      basePath: /
+      port: 8008
+    type: REST
+    networkVisibilities:
+      - Public
+
+  # gRPC 端点（Agent 连接）- Nezha 使用 HTTP/2 多路复用，gRPC 和 HTTP 共用同一端口
+  # 注意：Nezha 的 gRPC 是通过 Content-Type 检测自动路由的，不需要单独端口
