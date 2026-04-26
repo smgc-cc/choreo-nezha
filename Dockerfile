@@ -23,6 +23,7 @@ RUN apk add --no-cache \
     gzip \
     sqlite \
     curl \
+    caddy \
     busybox \
     && rm -rf /var/cache/apk/*
 
@@ -49,11 +50,12 @@ ENV GIN_MODE=release
 COPY backup.sh /dashboard/backup.sh
 COPY entrypoint.sh /dashboard/entrypoint.sh
 COPY crontab /dashboard/crontab
+COPY Caddyfile /dashboard/Caddyfile
 RUN chmod +x /dashboard/*.sh
 
 # 切换到 Choreo 指定用户 (10000-20000 范围)
 USER 10014
 
-EXPOSE 8008
+EXPOSE 8008 8009
 
 CMD ["/dashboard/entrypoint.sh"]
