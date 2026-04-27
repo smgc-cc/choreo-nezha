@@ -73,6 +73,9 @@ RUN rm -rf /dashboard/data && ln -s /tmp /dashboard/data
 # 设置环境变量
 ENV TZ=Asia/Shanghai
 ENV GIN_MODE=release
+ENV HOME=/tmp
+ENV XDG_CONFIG_HOME=/tmp/.config
+ENV XDG_DATA_HOME=/tmp/.local/share
 
 # 复制 Choreo 适配脚本
 COPY script/backup.sh /dashboard/backup.sh
