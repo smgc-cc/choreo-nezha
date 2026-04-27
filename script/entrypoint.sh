@@ -100,7 +100,7 @@ client_secret: ${NEZHA_LOCAL_AGENT_SECRET}
 tls: false
 disable_auto_update: true
 disable_force_update: true
-disable_command_execute: true
+disable_command_execute: false
 disable_nat: true
 EOF
             if [ -n "$NEZHA_LOCAL_AGENT_UUID" ]; then
