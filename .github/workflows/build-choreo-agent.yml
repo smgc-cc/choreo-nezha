@@ -18,13 +18,16 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout choreo repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: choreo-repo
 
@@ -71,7 +74,7 @@ jobs:
 
       - name: Checkout upstream agent
         if: steps.release_exists.outputs.exists != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: nezhahq/agent
           ref: ${{ steps.version.outputs.upstream_ref }}
@@ -80,7 +83,7 @@ jobs:
 
       - name: Set up Go
         if: steps.release_exists.outputs.exists != 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: agent-src/go.mod
           cache-dependency-path: agent-src/go.sum
@@ -112,7 +115,7 @@ jobs:
           archive = '''archives:
             - formats:
                 - tar.gz
-              name_template: "nezha_agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+              name_template: "choreo-nezha_agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
           '''
           if '\nsnapshot:' in text:
