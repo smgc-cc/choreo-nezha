@@ -3,6 +3,7 @@ set -euo pipefail
 
 python3 - <<'PY'
 from pathlib import Path
+import re
 
 main = Path('cmd/agent/main.go')
 text = main.read_text()
@@ -17,11 +18,22 @@ if '"github.com/coder/websocket"' not in text:
         1,
     )
 
-old_conn = '''\t\t\tconn, err = grpc.NewClient(agentConfig.Server, securityOption, grpc.WithPerRPCCredentials(&auth))'''
-new_conn = '''\t\t\tconn, err = newGRPCConn(securityOption, &auth)'''
-if old_conn not in text:
-    raise SystemExit('cannot find grpc.NewClient connection line to replace')
-text = text.replace(old_conn, new_conn, 1)
+pattern = re.compile(
+    r'(?m)^(?P<indent>\s*)conn\s*,\s*err\s*=\s*grpc\.NewClient\(\s*'
+    r'agentConfig\.Server\s*,\s*'
+    r'securityOption\s*,\s*'
+    r'grpc\.WithPerRPCCredentials\(&auth\)\s*,?\s*'
+    r'\)',
+    re.DOTALL,
+)
+text, count = pattern.subn(
+    lambda m: f'{m.group("indent")}conn, err = newGRPCConn(securityOption, &auth)',
+    text,
+    count=1,
+)
+if count != 1:
+    matches = [line for line in text.splitlines() if 'grpc.NewClient' in line]
+    raise SystemExit('cannot find grpc.NewClient connection call to replace. candidates: ' + repr(matches[:5]))
 
 marker = '''func runService(action string, path string) {\n'''
 if marker not in text:
