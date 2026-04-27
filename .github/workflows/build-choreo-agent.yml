@@ -94,6 +94,34 @@ jobs:
           go get github.com/coder/websocket@latest
           go mod tidy
 
+      - name: Configure Choreo release archives
+        if: steps.release_exists.outputs.exists != 'true'
+        working-directory: agent-src
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.goreleaser.yml')
+          text = path.read_text()
+          if 'choreo-nezha_agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}' in text:
+              raise SystemExit(0)
+          if text.startswith('archives:') or '\narchives:' in text:
+              raise SystemExit('upstream .goreleaser.yml already defines archives; update Choreo archive naming logic')
+
+          archive = '''archives:
+            - formats:
+                - tar.gz
+              name_template: "choreo-nezha_agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+          '''
+          if '\nsnapshot:' in text:
+              text = text.replace('\nsnapshot:', '\n' + archive + 'snapshot:', 1)
+          else:
+              text = text.rstrip() + '\n\n' + archive
+          path.write_text(text)
+          PY
+
       - name: Prepare release tag for GoReleaser
         if: steps.release_exists.outputs.exists != 'true'
         working-directory: agent-src
@@ -104,7 +132,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git add cmd/agent/main.go model/config.go go.mod go.sum
+          git add cmd/agent/main.go model/config.go go.mod go.sum .goreleaser.yml
           git commit -m "Apply Choreo agent patch for ${CHOREO_TAG}"
           git tag -f "$CHOREO_TAG"
 
