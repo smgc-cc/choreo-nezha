@@ -47,13 +47,19 @@ echo "Restoring backup if available..."
 /dashboard/backup.sh restore
 
 # ==============================
-# 5. 启动 Caddy WebSocket 代理
+# 5. 启动 gRPC-over-WebSocket 隧道
+# ==============================
+echo "Starting gRPC-over-WebSocket tunnel on port 8010..."
+/dashboard/grpc-ws-tunnel -listen :8010 -target 127.0.0.1:${NEZHA_LISTEN_PORT} -path /grpc-tunnel &
+
+# ==============================
+# 6. 启动 Caddy WebSocket 代理
 # ==============================
 echo "Starting Caddy WebSocket proxy on port 8009..."
 caddy run --config /dashboard/Caddyfile --adapter caddyfile &
 
 # ==============================
-# 6. 启动主应用
+# 7. 启动主应用
 # ==============================
 echo "Starting Nezha Dashboard..."
 echo "Database: $DB_FILE"
