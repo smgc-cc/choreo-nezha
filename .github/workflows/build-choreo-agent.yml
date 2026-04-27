@@ -115,7 +115,7 @@ jobs:
           archive = '''archives:
             - formats:
                 - tar.gz
-              name_template: "choreo-nezha_agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+              name_template: "nezha_agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
           '''
           if '\nsnapshot:' in text:
