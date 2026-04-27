@@ -1,0 +1,170 @@
+name: Auto Update Choreo Nezha Version
+
+on:
+  schedule:
+    # 每天 UTC 00:00 (北京时间 08:00) 运行
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Check, update and notify
+        id: update_script
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
+        run: |
+          python - <<'PY'
+          import html
+          import json
+          import os
+          import re
+          import sys
+          import urllib.request
+
+          README = 'README.md'
+          API_URL = 'https://api.github.com/repos/nezhahq/nezha/releases/latest'
+
+          def semver_parts(version):
+              version = version.strip().lstrip('v')
+              core = version.split('-', 1)[0]
+              parts = []
+              for part in core.split('.'):
+                  try:
+                      parts.append(int(part))
+                  except ValueError:
+                      parts.append(0)
+              return parts
+
+          def send_telegram(token, chat_id, version, body):
+              if not token or not chat_id:
+                  print('::warning::Telegram secrets not set.')
+                  return
+
+              safe_body = html.escape(body or '')
+              pattern = r'\[([^\]]+)\]\((https?://[^)]+)\)'
+
+              def link_replacer(match):
+                  text = html.escape(match.group(1))
+                  url = html.escape(match.group(2), quote=True)
+                  return f'<a href="{url}">{text}</a>'
+
+              body_with_links = re.sub(pattern, link_replacer, safe_body)
+              text_content = f'<b>Nezha Choreo upstream update detected</b>\n\n<b>New Version:</b> {html.escape(version)}\n\n{body_with_links}'
+
+              if len(text_content) > 4000:
+                  text_content = text_content[:4000] + '\n...(content truncated)...'
+
+              url = f'https://api.telegram.org/bot{token}/sendMessage'
+              payload = {
+                  'chat_id': chat_id,
+                  'text': text_content,
+                  'parse_mode': 'HTML',
+                  'disable_web_page_preview': True,
+              }
+              headers = {'Content-Type': 'application/json'}
+
+              try:
+                  req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+                  urllib.request.urlopen(req)
+                  print('Telegram notification sent.')
+              except Exception as exc:
+                  print(f'::warning::Telegram notification failed: {exc}')
+
+          try:
+              if not os.path.exists(README):
+                  print(f'::error::{README} not found')
+                  sys.exit(1)
+
+              with open(README, 'r', encoding='utf-8') as f:
+                  content = f.read()
+
+              match = re.search(r'(?m)^# Version\s*\n\s*\n(v?[^\s]+)', content)
+              if not match:
+                  print('::warning::Cannot find current version in README.md.')
+                  sys.exit(0)
+              local_version = match.group(1).strip()
+              print(f'Local Version: {local_version}')
+
+              req = urllib.request.Request(API_URL)
+              token = os.environ.get('GITHUB_TOKEN')
+              if token:
+                  req.add_header('Authorization', f'token {token}')
+              req.add_header('Accept', 'application/vnd.github+json')
+
+              with urllib.request.urlopen(req) as response:
+                  data = json.loads(response.read().decode())
+              remote_version = data['tag_name']
+              remote_body = data.get('body') or ''
+              print(f'Remote Version: {remote_version}')
+
+              if semver_parts(remote_version) <= semver_parts(local_version):
+                  print('Local version is up to date.')
+                  sys.exit(0)
+
+              content = re.sub(
+                  r'(?m)(^# Version\s*\n\s*\n)(v?[^\s]+)',
+                  rf'\g<1>{remote_version}',
+                  content,
+                  count=1,
+              )
+              content = re.sub(
+                  r'(?s)(^# Releases\s*\n\s*\n).*',
+                  rf'\g<1>{remote_body.strip()}\n',
+                  content,
+                  count=1,
+              )
+
+              with open(README, 'w', encoding='utf-8') as f:
+                  f.write(content)
+
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as gh_out:
+                  gh_out.write('updated=true\n')
+                  gh_out.write(f'new_version={remote_version}\n')
+
+              send_telegram(
+                  os.environ.get('TELEGRAM_TOKEN'),
+                  os.environ.get('TELEGRAM_TO'),
+                  remote_version,
+                  remote_body,
+              )
+          except Exception as exc:
+              print(f'::error::Script failed: {exc}')
+              sys.exit(1)
+          PY
+
+      - name: Commit and push changes
+        if: steps.update_script.outputs.updated == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: update to ${{ steps.update_script.outputs.new_version }}"
+          git push
+
+  cleanup-runs:
+    runs-on: ubuntu-latest
+    needs: check-and-update
+    if: always()
+    steps:
+      - name: Delete old workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 7
+          keep_minimum_runs: 6
