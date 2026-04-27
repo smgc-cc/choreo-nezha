@@ -4,6 +4,17 @@
 FROM ghcr.io/nezhahq/nezha:latest AS upstream
 
 # ==========================================
+# 构建 gRPC-over-WebSocket 隧道
+# ==========================================
+FROM golang:1.24-alpine AS tunnel-builder
+
+WORKDIR /src
+COPY grpc-ws-tunnel.go ./grpc-ws-tunnel.go
+RUN go mod init choreo-grpc-ws-tunnel \
+    && go get github.com/coder/websocket@latest \
+    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o grpc-ws-tunnel ./grpc-ws-tunnel.go
+
+# ==========================================
 # 最终镜像：添加 Choreo 所需的工具和配置
 # 使用 Alpine 以便安装额外工具（上游用 busybox 太精简）
 # ==========================================
@@ -37,6 +48,7 @@ WORKDIR /dashboard
 COPY --from=upstream /dashboard/app /dashboard/app
 COPY --from=upstream /etc/ssl/certs /etc/ssl/certs
 COPY --from=upstream /usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=tunnel-builder /src/grpc-ws-tunnel /dashboard/grpc-ws-tunnel
 
 # --- 关键修复：解决只读文件系统 ---
 # 删除原有的 data 目录，建立软链接指向 /tmp
@@ -51,11 +63,11 @@ COPY backup.sh /dashboard/backup.sh
 COPY entrypoint.sh /dashboard/entrypoint.sh
 COPY crontab /dashboard/crontab
 COPY Caddyfile /dashboard/Caddyfile
-RUN chmod +x /dashboard/*.sh
+RUN chmod +x /dashboard/*.sh /dashboard/grpc-ws-tunnel
 
 # 切换到 Choreo 指定用户 (10000-20000 范围)
 USER 10014
 
-EXPOSE 8008 8009 8010
+EXPOSE 8008 8009
 
 CMD ["/dashboard/entrypoint.sh"]
