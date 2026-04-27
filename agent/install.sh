@@ -37,7 +37,7 @@ sudo() {
 }
 
 deps_check() {
-    local deps="curl unzip grep"
+    local deps="curl grep tar"
     local _err=0
     local missing=""
 
@@ -132,12 +132,23 @@ init() {
 install() {
     echo "Installing..."
 
-    NZ_AGENT_URL="https://github.com/${NZ_AGENT_REPO}/releases/latest/download/nezha-agent_${os}_${os_arch}.zip"
+    if [ -z "${NZ_AGENT_VERSION:-}" ]; then
+        latest_url="https://api.github.com/repos/${NZ_AGENT_REPO}/releases/latest"
+        NZ_AGENT_VERSION=$(curl -m 10 -fsSL "$latest_url" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)
+    fi
+
+    if [ -z "$NZ_AGENT_VERSION" ]; then
+        err "Failed to resolve latest release version from ${NZ_AGENT_REPO}"
+        exit 1
+    fi
+
+    NZ_AGENT_ARCHIVE="nezha_agent_${NZ_AGENT_VERSION}_${os}_${os_arch}.tar.gz"
+    NZ_AGENT_URL="https://github.com/${NZ_AGENT_REPO}/releases/latest/download/${NZ_AGENT_ARCHIVE}"
 
     if command -v wget >/dev/null 2>&1; then
-        _cmd="wget --timeout=60 -O /tmp/nezha-agent_${os}_${os_arch}.zip \"$NZ_AGENT_URL\" >/dev/null 2>&1"
+        _cmd="wget --timeout=60 -O /tmp/${NZ_AGENT_ARCHIVE} \"$NZ_AGENT_URL\" >/dev/null 2>&1"
     elif command -v curl >/dev/null 2>&1; then
-        _cmd="curl --max-time 60 -fsSL \"$NZ_AGENT_URL\" -o /tmp/nezha-agent_${os}_${os_arch}.zip >/dev/null 2>&1"
+        _cmd="curl --max-time 60 -fsSL \"$NZ_AGENT_URL\" -o /tmp/${NZ_AGENT_ARCHIVE} >/dev/null 2>&1"
     fi
 
     if ! eval "$_cmd"; then
@@ -147,8 +158,8 @@ install() {
 
     sudo mkdir -p $NZ_AGENT_PATH
 
-    sudo unzip -qo /tmp/nezha-agent_${os}_${os_arch}.zip -d $NZ_AGENT_PATH &&
-        sudo rm -rf /tmp/nezha-agent_${os}_${os_arch}.zip
+    sudo tar -xzf "/tmp/${NZ_AGENT_ARCHIVE}" -C "$NZ_AGENT_PATH" &&
+        sudo rm -rf "/tmp/${NZ_AGENT_ARCHIVE}"
 
     path="$NZ_AGENT_PATH/config.yml"
     if [ -f "$path" ]; then
