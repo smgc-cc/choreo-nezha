@@ -9,7 +9,7 @@ FROM ghcr.io/nezhahq/nezha:latest AS upstream
 FROM golang:1.26-alpine AS tunnel-builder
 
 WORKDIR /src
-COPY script/choreo/grpc-ws-tunnel.go ./grpc-ws-tunnel.go
+COPY agent/grpc-ws-tunnel.go ./grpc-ws-tunnel.go
 RUN go mod init choreo-grpc-ws-tunnel \
     && go get github.com/coder/websocket@latest \
     && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o grpc-ws-tunnel ./grpc-ws-tunnel.go
