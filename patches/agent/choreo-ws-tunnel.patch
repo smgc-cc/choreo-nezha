@@ -1,0 +1,98 @@
+diff --git a/cmd/agent/main.go b/cmd/agent/main.go
+--- a/cmd/agent/main.go
++++ b/cmd/agent/main.go
+@@ -23,6 +23,7 @@ import (
+ 	"time"
+
+ 	"github.com/blang/semver"
++	"github.com/coder/websocket"
+ 	"github.com/nezhahq/go-github-selfupdate/selfupdate"
+ 	"github.com/nezhahq/service"
+ 	ping "github.com/prometheus-community/pro-bing"
+@@ -270,15 +271,7 @@ func run() {
+
+ 		for {
+-			var securityOption grpc.DialOption
+-			if agentConfig.TLS {
+-				if agentConfig.InsecureTLS {
+-					securityOption = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}))
+-				} else {
+-					securityOption = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}))
+-				}
+-			} else {
+-				securityOption = grpc.WithTransportCredentials(insecure.NewCredentials())
+-			}
+-			conn, err = grpc.NewClient(agentConfig.Server, securityOption, grpc.WithPerRPCCredentials(&auth))
++			conn, err = newGRPCConn(&auth)
+ 			if err != nil {
+ 				printf("与面板建立连接失败: %v", err)
+ 				retry()
+@@ -338,6 +331,39 @@ func run() {
+ 	}
+ }
++
++func newGRPCConn(auth *model.AuthHandler) (*grpc.ClientConn, error) {
++	if strings.HasPrefix(agentConfig.Server, "ws://") || strings.HasPrefix(agentConfig.Server, "wss://") {
++		return grpc.NewClient(
++			"passthrough:///nezha-ws-tunnel",
++			grpc.WithTransportCredentials(insecure.NewCredentials()),
++			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
++				wsConn, _, err := websocket.Dial(ctx, agentConfig.Server, &websocket.DialOptions{
++					CompressionMode: websocket.CompressionDisabled,
++				})
++				if err != nil {
++					return nil, err
++				}
++				return websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary), nil
++			}),
++			grpc.WithPerRPCCredentials(auth),
++		)
++	}
++
++	var securityOption grpc.DialOption
++	if agentConfig.TLS {
++		if agentConfig.InsecureTLS {
++			securityOption = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}))
++		} else {
++			securityOption = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}))
++		}
++	} else {
++		securityOption = grpc.WithTransportCredentials(insecure.NewCredentials())
++	}
++	return grpc.NewClient(agentConfig.Server, securityOption, grpc.WithPerRPCCredentials(auth))
++}
+
+ func runService(action string, path string) {
+ 	winConfig := map[string]interface{}{
+@@ -635,9 +661,24 @@ func doSelfUpdate(useLocalVersion bool) (exit bool) {
+
+ 	printf("检查更新: %v", v)
+ 	var latest *selfupdate.Release
++	updateRepo := strings.TrimSpace(agentConfig.UpdateRepo)
++	if updateRepo == "" {
++		updateRepo = "smgc-cc/choreo-nezha"
++	}
+ 	switch {
++	case updateRepo != "":
++		updater, erru := selfupdate.NewUpdater(selfupdate.Config{
++			BinaryName: binaryName,
++		})
++		if erru != nil {
++			printf("更新失败: %v", erru)
++			return
++		}
++		latest, err = updater.UpdateSelf(v, updateRepo)
+ 	case agentConfig.UseGiteeToUpgrade:
+ 		updater, erru := selfupdate.NewGiteeUpdater(selfupdate.Config{
+ 			BinaryName: binaryName,
+diff --git a/model/config.go b/model/config.go
+--- a/model/config.go
++++ b/model/config.go
+@@ -39,6 +39,7 @@ type AgentConfig struct {
+ 	UseIPv6CountryCode          bool            `koanf:"use_ipv6_country_code" json:"use_ipv6_country_code"`     // 默认优先展示IPv6旗帜
+ 	UseGiteeToUpgrade           bool            `koanf:"use_gitee_to_upgrade" json:"use_gitee_to_upgrade"`       // 强制从Gitee获取更新
+ 	UseAtomGitToUpgrade         bool            `koanf:"use_atomgit_to_upgrade" json:"use_atomgit_to_upgrade"`   // 强制从AtomGit获取更新
++	UpdateRepo                  string          `koanf:"update_repo" json:"update_repo,omitempty"`               // 自定义 GitHub 更新仓库
+ 	DisableNat                  bool            `koanf:"disable_nat" json:"disable_nat"`                         // 关闭内网穿透
+ 	DisableSendQuery            bool            `koanf:"disable_send_query" json:"disable_send_query"`           // 关闭发送TCP/ICMP/HTTP请求
+ 	IPReportPeriod              uint32          `koanf:"ip_report_period" json:"ip_report_period"`               // IP上报周期
