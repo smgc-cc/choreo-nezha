@@ -1,3 +1,8 @@
+{
+    auto_https off
+    admin off
+}
+
 :8009 {
     @grpcTunnel path /grpc-tunnel
     reverse_proxy @grpcTunnel 127.0.0.1:8010

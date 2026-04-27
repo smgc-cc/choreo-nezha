@@ -28,7 +28,7 @@ sync_agent_secret_key() {
 # 1. 初始化 /tmp 目录结构
 # ==============================
 echo "Initializing directory structure in /tmp..."
-mkdir -p /tmp/tsdb
+mkdir -p /tmp/tsdb /tmp/.config/caddy /tmp/.local/share/caddy
 
 # ==============================
 # 2. 创建默认配置文件（如果不存在）
@@ -72,7 +72,7 @@ echo "Starting gRPC-over-WebSocket tunnel on port 8010..."
 # 6. 启动 Caddy WebSocket 代理
 # ==============================
 echo "Starting Caddy WebSocket proxy on port 8009..."
-caddy run --config /dashboard/Caddyfile --adapter caddyfile &
+HOME=/tmp XDG_CONFIG_HOME=/tmp/.config XDG_DATA_HOME=/tmp/.local/share caddy run --config /dashboard/Caddyfile --adapter caddyfile &
 
 # ==============================
 # 7. 启动内置 Nezha Agent（可选）
