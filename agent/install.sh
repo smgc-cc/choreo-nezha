@@ -156,10 +156,27 @@ install() {
         exit 1
     fi
 
-    sudo mkdir -p $NZ_AGENT_PATH
+    sudo mkdir -p "$NZ_AGENT_PATH"
 
-    sudo tar -xzf "/tmp/${NZ_AGENT_ARCHIVE}" -C "$NZ_AGENT_PATH" &&
-        sudo rm -rf "/tmp/${NZ_AGENT_ARCHIVE}"
+    extract_dir="/tmp/nezha-agent-extract-${os}-${os_arch}-$$"
+    rm -rf "$extract_dir"
+    mkdir -p "$extract_dir"
+
+    if ! tar -xzf "/tmp/${NZ_AGENT_ARCHIVE}" -C "$extract_dir"; then
+        rm -rf "$extract_dir" "/tmp/${NZ_AGENT_ARCHIVE}"
+        err "Extract nezha-agent release failed"
+        exit 1
+    fi
+
+    if [ ! -f "$extract_dir/nezha-agent" ]; then
+        rm -rf "$extract_dir" "/tmp/${NZ_AGENT_ARCHIVE}"
+        err "nezha-agent binary not found in release archive"
+        exit 1
+    fi
+
+    sudo cp -f "$extract_dir/nezha-agent" "$NZ_AGENT_PATH/nezha-agent"
+    sudo chmod +x "$NZ_AGENT_PATH/nezha-agent"
+    rm -rf "$extract_dir" "/tmp/${NZ_AGENT_ARCHIVE}"
 
     path="$NZ_AGENT_PATH/config.yml"
     if [ -f "$path" ]; then
