@@ -2,7 +2,7 @@
 
 # Version
 
-v2.0.7
+v2.0.6
 
 # Releases
 
