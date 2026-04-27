@@ -9,10 +9,24 @@ FROM ghcr.io/nezhahq/nezha:latest AS upstream
 FROM golang:1.24-alpine AS tunnel-builder
 
 WORKDIR /src
-COPY grpc-ws-tunnel.go ./grpc-ws-tunnel.go
+COPY agent/grpc-ws-tunnel.go ./grpc-ws-tunnel.go
 RUN go mod init choreo-grpc-ws-tunnel \
     && go get github.com/coder/websocket@latest \
     && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o grpc-ws-tunnel ./grpc-ws-tunnel.go
+
+# ==========================================
+# 构建内置 Nezha Agent
+# ==========================================
+FROM golang:1.24-alpine AS agent-builder
+
+WORKDIR /src
+RUN apk add --no-cache git
+RUN git clone https://github.com/nezhahq/agent.git . \
+    && git fetch --tags \
+    && LATEST_TAG=$(git describe --tags --abbrev=0) \
+    && git checkout "$LATEST_TAG" \
+    && go mod download \
+    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nezha-agent ./cmd/agent
 
 # ==========================================
 # 最终镜像：添加 Choreo 所需的工具和配置
@@ -49,6 +63,7 @@ COPY --from=upstream /dashboard/app /dashboard/app
 COPY --from=upstream /etc/ssl/certs /etc/ssl/certs
 COPY --from=upstream /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=tunnel-builder /src/grpc-ws-tunnel /dashboard/grpc-ws-tunnel
+COPY --from=agent-builder /src/nezha-agent /dashboard/nezha-agent
 
 # --- 关键修复：解决只读文件系统 ---
 # 删除原有的 data 目录，建立软链接指向 /tmp
@@ -59,11 +74,11 @@ ENV TZ=Asia/Shanghai
 ENV GIN_MODE=release
 
 # 复制 Choreo 适配脚本
-COPY backup.sh /dashboard/backup.sh
-COPY entrypoint.sh /dashboard/entrypoint.sh
-COPY crontab /dashboard/crontab
-COPY Caddyfile /dashboard/Caddyfile
-RUN chmod +x /dashboard/*.sh /dashboard/grpc-ws-tunnel
+COPY script/backup.sh /dashboard/backup.sh
+COPY script/entrypoint.sh /dashboard/entrypoint.sh
+COPY script/crontab /dashboard/crontab
+COPY script/Caddyfile /dashboard/Caddyfile
+RUN chmod +x /dashboard/*.sh /dashboard/grpc-ws-tunnel /dashboard/nezha-agent
 
 # 切换到 Choreo 指定用户 (10000-20000 范围)
 USER 10014
