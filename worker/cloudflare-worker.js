@@ -30,6 +30,17 @@ const HTTP_PATH_PREFIX = "/default/nezha/v1.0";
 // 前端 WebSocket 和自定义 agent 的 /grpc-tunnel 都走这个 Choreo WS endpoint。
 const WS_PATH_PREFIX = "/default/nezha/nezha_ws/v1.0";
 
+// Dashboard 前端复制的 agent 安装命令来自上游构建产物，无法用 install_host 配置脚本 URL。
+// 这里在 Worker 层把上游脚本 URL 改成 patched Choreo agent 安装脚本。
+const AGENT_INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/smgc-cc/choreo-nezha/main/agent/install.sh";
+const UPSTREAM_AGENT_INSTALL_PATTERNS = [
+  /https:\/\/raw\.githubusercontent\.com\/nezhahq\/scripts\/[^\s'"`<>]+\/(?:agent\/)?install(?:_en)?\.sh/g,
+  /https:\/\/gitee\.com\/naibahq\/scripts\/raw\/[^\s'"`<>]+\/(?:agent\/)?install\.sh/g,
+  /https:\/\/cdn\.jsdelivr\.net\/gh\/nezhahq\/scripts@[^\s'"`<>]+\/(?:agent\/)?install(?:_en)?\.sh/g,
+  /https:\/\/fastly\.jsdelivr\.net\/gh\/nezhahq\/scripts@[^\s'"`<>]+\/(?:agent\/)?install(?:_en)?\.sh/g,
+  /https:\/\/testingcf\..jsdelivr\.net\/gh\/nezhahq\/scripts@[^\s'"`<>]+\/(?:agent\/)?install(?:_en)?\.sh/g,
+];
+
 // ============ 代码区域 ============
 
 export default {
@@ -220,13 +231,26 @@ async function handleProxy(request, url, isGRPC) {
       redirectCount++;
     }
 
-    // 读取完整响应体
-    const responseBody = await response.arrayBuffer();
-
     const newHeaders = new Headers(response.headers);
     newHeaders.set("Access-Control-Allow-Origin", "*");
     newHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     newHeaders.set("Access-Control-Allow-Headers", "*");
+
+    const contentType = newHeaders.get("Content-Type") || "";
+    if (shouldRewriteAgentInstallCommand(path, contentType)) {
+      const responseText = await response.text();
+      const rewrittenBody = rewriteAgentInstallCommand(responseText);
+      newHeaders.delete("Content-Length");
+      newHeaders.delete("Content-Encoding");
+      return new Response(rewrittenBody, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: newHeaders,
+      });
+    }
+
+    // 读取完整响应体
+    const responseBody = await response.arrayBuffer();
 
     return new Response(responseBody, {
       status: response.status,
@@ -249,6 +273,24 @@ async function handleProxy(request, url, isGRPC) {
 }
 
 /**
+ * 判断响应是否可能包含 Dashboard 复制的 agent 安装命令
+ */
+function shouldRewriteAgentInstallCommand(path, contentType) {
+  const isTextResponse = /text\/html|application\/javascript|text\/javascript|application\/json|text\/plain/i.test(contentType);
+  return isTextResponse && (path.startsWith('/dashboard/') || path === '/dashboard' || path === '/api/v1/setting');
+}
+
+/**
+ * 替换上游 agent 安装脚本地址
+ */
+function rewriteAgentInstallCommand(body) {
+  return UPSTREAM_AGENT_INSTALL_PATTERNS.reduce(
+    (text, pattern) => text.replace(pattern, AGENT_INSTALL_SCRIPT_URL),
+    body,
+  );
+}
+
+/**
  * 克隆请求头，替换 Host
  */
 function cloneHeaders(originalHeaders, newHost) {
@@ -259,5 +301,6 @@ function cloneHeaders(originalHeaders, newHost) {
     }
   }
   headers.set('Host', newHost);
+  headers.set('Accept-Encoding', 'identity');
   return headers;
 }
