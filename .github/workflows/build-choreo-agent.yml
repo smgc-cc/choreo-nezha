@@ -90,7 +90,7 @@ jobs:
         working-directory: agent-src
         run: |
           set -euo pipefail
-          git apply ../choreo-repo/patches/agent/choreo-ws-tunnel.patch
+          bash ../choreo-repo/agent/apply-choreo-ws-tunnel.sh
           go get github.com/coder/websocket@latest
           go mod tidy
 
