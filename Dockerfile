@@ -6,7 +6,7 @@ FROM ghcr.io/nezhahq/nezha:latest AS upstream
 # ==========================================
 # 构建 gRPC-over-WebSocket 隧道
 # ==========================================
-FROM golang:1.24-alpine AS tunnel-builder
+FROM golang:1.26-alpine AS tunnel-builder
 
 WORKDIR /src
 COPY agent/grpc-ws-tunnel.go ./grpc-ws-tunnel.go
@@ -17,7 +17,7 @@ RUN go mod init choreo-grpc-ws-tunnel \
 # ==========================================
 # 构建内置 Nezha Agent
 # ==========================================
-FROM golang:1.24-alpine AS agent-builder
+FROM golang:1.26-alpine AS agent-builder
 
 WORKDIR /src
 RUN apk add --no-cache git
