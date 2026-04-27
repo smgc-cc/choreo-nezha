@@ -9,7 +9,7 @@ FROM ghcr.io/nezhahq/nezha:latest AS upstream
 FROM golang:1.26-alpine AS tunnel-builder
 
 WORKDIR /src
-COPY agent/grpc-ws-tunnel.go ./grpc-ws-tunnel.go
+COPY script/choreo/grpc-ws-tunnel.go ./grpc-ws-tunnel.go
 RUN go mod init choreo-grpc-ws-tunnel \
     && go get github.com/coder/websocket@latest \
     && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o grpc-ws-tunnel ./grpc-ws-tunnel.go
@@ -25,8 +25,9 @@ RUN git clone https://github.com/nezhahq/agent.git . \
     && git fetch --tags \
     && LATEST_TAG=$(git describe --tags --abbrev=0) \
     && git checkout "$LATEST_TAG" \
+    && VERSION="${LATEST_TAG#v}" \
     && go mod download \
-    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nezha-agent ./cmd/agent
+    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/nezhahq/agent/pkg/monitor.Version=${VERSION} -X main.arch=$(go env GOARCH)" -o nezha-agent ./cmd/agent
 
 # ==========================================
 # 最终镜像：添加 Choreo 所需的工具和配置
