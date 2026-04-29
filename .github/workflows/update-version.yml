@@ -2,7 +2,7 @@ name: Auto Update Choreo Nezha Version
 
 on:
   schedule:
-    # 每天 UTC 00:00 (北京时间 08:00) 运行
+    # 每天 UTC 00:00 (北京时间 08:00) 检查 nezhahq/nezha 最新 release。
     - cron: '0 0 * * *'
   workflow_dispatch:
 
@@ -115,19 +115,26 @@ jobs:
               remote_body = data.get('body') or ''
               print(f'Remote Version: {remote_version}')
 
-              if semver_parts(remote_version) <= semver_parts(local_version):
-                  print('Local version is up to date.')
+              current_releases_match = re.search(r'(?ms)^# Releases\s*\n\s*\n(.*)\Z', content)
+              current_releases = current_releases_match.group(1).strip() if current_releases_match else ''
+              desired_releases = remote_body.strip() or f'Upstream release: https://github.com/Wei-Shaw/sub2api/releases/tag/{remote_version}'
+
+              version_is_newer = semver_parts(remote_version) > semver_parts(local_version)
+              releases_changed = current_releases != desired_releases
+
+              if not version_is_newer and not releases_changed:
+                  print('Local version and release notes are up to date.')
                   sys.exit(0)
 
               content = re.sub(
                   r'(?m)(^# Version\s*\n\s*\n)(v?[^\s]+)',
-                  rf'\g<1>{remote_version}',
+                  lambda match: match.group(1) + remote_version,
                   content,
                   count=1,
               )
               content = re.sub(
-                  r'(?s)(^# Releases\s*\n\s*\n).*',
-                  rf'\g<1>{remote_body.strip()}\n',
+                  r'(?ms)(^# Releases\s*\n\s*\n).*\Z',
+                  lambda match: match.group(1) + desired_releases + '\n',
                   content,
                   count=1,
               )
