@@ -21,32 +21,42 @@
 - `/grpc-tunnel` 支持外部 patched Agent 通过 WebSocket 上报
 - 可选启动内置 `nezha-agent`，直接连接本机 `127.0.0.1:8008`
 
-## 当前架构
+## 架构
+
+### 模式一: Snippet + Worker 混合（推荐）
+
+HTTP 走免费 Snippet，WebSocket 走 Worker（每个 WS 连接只算 1 次请求）。
 
 ```text
-浏览器 HTTP
-  -> Cloudflare Worker
-  -> Choreo REST endpoint :8008
-  -> Nezha Dashboard
+nezha.example.com (Snippet)
+├── 浏览器 HTTP (页面/API/资源) → Snippet → Choreo REST :8008 → Nezha Dashboard
+└── 浏览器 WebSocket → 注入脚本自动重定向到 ws.nezha.example.com ↓
 
-浏览器 WebSocket
-  -> Cloudflare Worker
-  -> Choreo WS endpoint :8009
-  -> Caddy
-  -> Nezha Dashboard :8008
-
-外部 Agent
-  -> patched choreo-agent
-  -> wss://你的域名/grpc-tunnel
-  -> Cloudflare Worker
-  -> Choreo WS endpoint :8009
-  -> Caddy
-  -> grpc-ws-tunnel :8010
-  -> Nezha Dashboard :8008
+ws.nezha.example.com (Worker)
+├── 浏览器 WebSocket → Worker → Choreo WS :8009 → Caddy → Nezha Dashboard :8008
+└── 外部 Agent gRPC  → Worker → Choreo WS :8009 → Caddy → grpc-ws-tunnel :8010 → Nezha :8008
 
 内置 Agent（可选）
-  -> /dashboard/nezha-agent
-  -> 127.0.0.1:8008
+  -> /dashboard/nezha-agent -> 127.0.0.1:8008
+```
+
+**原理:**
+- Snippet 在返回 HTML 时注入脚本，monkey-patch `window.WebSocket`，自动将前端 WS 连接重定向到 `ws.{host}`
+- Snippet 改写 `Set-Cookie` 的 `nz-jwt`，添加 `Domain=.{host}`，使登录态对 `ws.{host}` 也生效
+- 外部 Agent 的 `-s` 参数直接填 `ws.{host}` 域名
+
+### 模式二: 独立 Worker
+
+所有流量（HTTP + WebSocket）都走 Worker。
+
+```text
+nezha.example.com (Worker)
+├── 浏览器 HTTP → Worker → Choreo REST :8008 → Nezha Dashboard
+├── 浏览器 WebSocket → Worker → Choreo WS :8009 → Caddy → Nezha Dashboard :8008
+└── 外部 Agent gRPC  → Worker → Choreo WS :8009 → Caddy → grpc-ws-tunnel :8010 → Nezha :8008
+
+内置 Agent（可选）
+  -> /dashboard/nezha-agent -> 127.0.0.1:8008
 ```
 
 Choreo endpoint 配置见 `.choreo/component.yaml`：
@@ -72,9 +82,12 @@ endpoints:
 
 ```text
 choreo-nezha/
-├── Dockerfile                 # Choreo 专用 Dockerfile
+├── Dockerfile                        # Choreo 专用 Dockerfile
 ├── worker/
-│   └── cloudflare-worker.js          # Cloudflare Worker 代理脚本
+│   ├── _snippet.js                   # Cloudflare Snippet (混合模式 HTTP)
+│   ├── _worker.js                    # Cloudflare Worker  (混合模式 WS)
+│   ├── _worker_standalone.js         # Cloudflare Worker  (独立模式)
+│   └── cloudflare-worker.js          # 同 _worker_standalone.js (兼容旧引用)
 ├── .choreo/
 │   └── component.yaml                # Choreo endpoint 配置
 ├── script/
@@ -154,11 +167,50 @@ WEBDAV_PASSWORD=your-app-password
 https://xxxx-dev.e1-us-east-azure.choreoapis.dev/default/nezha/v1.0
 ```
 
-### 5. 部署 Cloudflare Worker
+### 5. 部署 Cloudflare 代理
 
-Choreo Public URL 会强制带路径前缀，例如 `/default/nezha/v1.0`。Nezha Dashboard 期望从 `/` 提供页面，因此需要 Worker 去掉/补齐路径前缀。
+Choreo Public URL 会强制带路径前缀，例如 `/default/nezha/v1.0`。Nezha Dashboard 期望从 `/` 提供页面，因此需要 Cloudflare 层去掉/补齐路径前缀。
 
-使用仓库里的 `cloudflare-worker.js`，修改顶部配置：
+#### 方式 A: Snippet + Worker 混合（推荐）
+
+> Snippet 免费无限，Worker 仅处理 WS 握手（1 req/连接），大幅降低 Worker 请求用量。
+
+**步骤 1 — 部署 Snippet:**
+
+1. Cloudflare Dashboard → Rules → Snippets → Create Snippet
+2. 粘贴 `worker/_snippet.js`，修改顶部配置：
+
+```js
+const CHOREO_ORIGIN = "xxxx-dev.e1-us-east-azure.choreoapis.dev";
+const HTTP_PATH_PREFIX = "/default/nezha/v1.0";
+```
+
+3. 关联到主域名，例如 `nezha.example.com`
+
+**步骤 2 — 部署 Worker:**
+
+1. Cloudflare Dashboard → Workers & Pages → Create Worker
+2. 粘贴 `worker/_worker.js`，修改顶部配置：
+
+```js
+const CHOREO_ORIGIN = "xxxx-dev.e1-us-east-azure.choreoapis.dev";
+const WS_PATH_PREFIX = "/default/nezha/nezha_ws/v1.0";
+```
+
+3. 在 Worker Settings → Triggers 中绑定自定义域名 `ws.nezha.example.com`
+4. 确保 `ws.nezha.example.com` DNS 开启 Cloudflare 代理（橙色云朵）
+
+**步骤 3 — 外部 Agent 配置:**
+
+外部 Agent 的 `-s` 参数使用 `ws.` 域名：
+
+```yaml
+server: wss://ws.nezha.example.com/grpc-tunnel
+```
+
+#### 方式 B: 独立 Worker
+
+使用 `worker/_worker_standalone.js`（或 `worker/cloudflare-worker.js`），修改顶部配置：
 
 ```js
 const CHOREO_ORIGIN = "xxxx-dev.e1-us-east-azure.choreoapis.dev";
@@ -166,13 +218,7 @@ const HTTP_PATH_PREFIX = "/default/nezha/v1.0";
 const WS_PATH_PREFIX = "/default/nezha/nezha_ws/v1.0";
 ```
 
-然后在 Cloudflare Worker 绑定自定义域名，例如：
-
-```text
-https://nezha.example.com
-```
-
-浏览器访问和外部 Agent 都建议使用这个自定义域名。
+然后在 Cloudflare Worker 绑定自定义域名，例如 `nezha.example.com`。
 
 ## 环境变量说明
 
@@ -447,11 +493,20 @@ const HTTP_PATH_PREFIX = "/default/nezha/v1.0";
 
 ### WebSocket 连接失败
 
+**独立 Worker 模式:**
+
 确认：
 
 ```js
 const WS_PATH_PREFIX = "/default/nezha/nezha_ws/v1.0";
 ```
+
+**混合模式:**
+
+确认：
+1. Worker 已绑定 `ws.{host}` 自定义域名
+2. DNS 记录开启 Cloudflare 代理（橙色云朵）
+3. Worker 中的 `WS_PATH_PREFIX` 正确
 
 并确认 `.choreo/component.yaml` 中 `nezha_ws` endpoint 是：
 
@@ -532,5 +587,7 @@ echo $WEBDAV_USERNAME
 
 - `AGENT_CHOREO.md`：外部 patched Agent 自动构建与使用说明
 - `.choreo/component.yaml`：Choreo endpoint 配置
-- `worker/cloudflare-worker.js`：Cloudflare Worker 代理脚本
+- `worker/_snippet.js`：Cloudflare Snippet（混合模式 HTTP）
+- `worker/_worker.js`：Cloudflare Worker（混合模式 WS）
+- `worker/_worker_standalone.js`：Cloudflare Worker（独立模式）
 - `script/backup.sh`：R2/WebDAV 备份脚本
