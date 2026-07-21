@@ -9,6 +9,11 @@
 - 外部 Agent 通过 gRPC-over-WebSocket 接入
 - 容器内可选内置一个上游原版 `nezha-agent`
 
+两套边缘方案：
+
+1. **模式一（推荐）**：Cloudflare Snippet + 原生 WS 穿透
+2. **模式二（备选）**：全流量 Cloudflare Worker
+
 ## 主要特性
 
 - 支持 Choreo 只读文件系统：`/dashboard/data -> /tmp`
@@ -17,97 +22,156 @@
 - 每 2 小时自动备份，默认保留 7 天
 - 备份 SQLite、`config.yaml`、VictoriaMetrics TSDB、GeoIP 数据库
 - Dashboard REST endpoint 与 WebSocket endpoint 分端口暴露
-- Cloudflare Worker 处理 Choreo Public URL 路径前缀
+- Cloudflare Snippet 处理 Choreo Public URL 路径前缀（模式一）
 - `/grpc-tunnel` 支持外部 patched Agent 通过 WebSocket 上报
 - 可选启动内置 `nezha-agent`，直接连接本机 `127.0.0.1:8008`
 
-## 架构
+---
 
-### 模式一: Snippet + Worker 混合（推荐）
+## 模式一：Snippet（推荐）
 
-HTTP 走免费 Snippet，WebSocket 走 Worker（每个 WS 连接只算 1 次请求）。
+### 架构
 
 ```text
-nezha.example.com (Snippet)
-├── 浏览器 HTTP (页面/API/资源) → Snippet → Choreo REST :8008 → Nezha Dashboard
-└── 浏览器 WebSocket → 注入脚本自动重定向到 ws.nezha.example.com ↓
+nezha.example.com（本 zone 橙云 + Choreo 自定义域）
+├── HTTP  → Snippet → CHOREO_ORIGIN + /default/nezha/v1.0/...
+└── WebSocket
+      注入补路径前缀（WS_PUBLIC_HOST 为空 = 同源）
+      wss://nezha.example.com/default/nezha/nezha_ws/v1.0/...
+      → 原生穿透 → Choreo WS → Caddy :8009
+           ├─ /grpc-tunnel → grpc-ws-tunnel :8010 → Nezha :8008
+           └─ 其他 WS      → Nezha Dashboard :8008
 
-ws.nezha.example.com (Worker)
-├── 浏览器 WebSocket → Worker → Choreo WS :8009 → Caddy → Nezha Dashboard :8008
-└── 外部 Agent gRPC  → Worker → Choreo WS :8009 → Caddy → grpc-ws-tunnel :8010 → Nezha :8008
+外部 patched Agent
+  server: wss://nezha.example.com/default/nezha/nezha_ws/v1.0/grpc-tunnel
 
 内置 Agent（可选）
   -> /dashboard/nezha-agent -> 127.0.0.1:8008
 ```
 
-**原理:**
-- Snippet 在返回 HTML 时注入脚本，monkey-patch `window.WebSocket`，自动将前端 WS 连接重定向到 `ws.{host}`
-- Snippet 改写 `Set-Cookie` 的 `nz-jwt`，添加 `Domain=.{host}`，使登录态对 `ws.{host}` 也生效
-- 外部 Agent 的 `-s` 参数直接填 `ws.{host}` 域名
+同源时 `nz-jwt` 为 **host-only**，终端等需登录态的 WS 可直接带 cookie，**不必**再设 `Domain=.host` / `SameSite=None`。
 
-### 模式二: 独立 Worker
+### 前提
 
-所有流量（HTTP + WebSocket）都走 Worker。
+| 项 | 说明 |
+|---|---|
+| DNS | 域名在 **本 Cloudflare zone** 橙云 |
+| Choreo | 自定义域名绑到组件（一服务通常一个自定义域） |
+| Network | **WebSockets = On** |
+| SSL 回源 | 源站为 `*.choreoapis.dev` 时建议 **Full**（非 Full Strict） |
 
-```text
-nezha.example.com (Worker)
-├── 浏览器 HTTP → Worker → Choreo REST :8008 → Nezha Dashboard
-├── 浏览器 WebSocket → Worker → Choreo WS :8009 → Caddy → Nezha Dashboard :8008
-└── 外部 Agent gRPC  → Worker → Choreo WS :8009 → Caddy → grpc-ws-tunnel :8010 → Nezha :8008
+### Snippet
 
-内置 Agent（可选）
-  -> /dashboard/nezha-agent -> 127.0.0.1:8008
+文件：`worker/_snippet.js`
+
+```javascript
+const CHOREO_ORIGIN = "xxxxx-dev.e1-us-east-azure.choreoapis.dev";
+const HTTP_PATH_PREFIX = "/default/nezha/v1.0";
+const WS_PATH_PREFIX = "/default/nezha/nezha_ws/v1.0";
+// 单域名：留空 = WebSocket 与页面同 host（推荐）
+const WS_PUBLIC_HOST = "";
+// 一般保持空（host-only cookie）
+const COOKIE_DOMAIN = "";
 ```
 
-Choreo endpoint 配置见 `.choreo/component.yaml`：
+匹配：你的面板域名（如 `nezha.example.com`）。
+
+要点：
+
+- HTTP：`toChoreoHttpPath` 补 REST 前缀；误带 `nezha_ws` 时改写成 REST
+- `WS_PUBLIC_HOST === ""` 时注入只补路径前缀，不改 host
+- HTML：注入 monkey-patch `window.WebSocket`；`Cache-Control: no-store`
+- 仍会把上游 agent 安装脚本 URL 改成本仓库 `agent/install.sh`
+- **不要**再对同一域名挂全流量 Worker
+
+### Caddy（容器 8009）
+
+文件：`script/Caddyfile`
+
+- 剥网关前缀 `/default/nezha/nezha_ws/v1.0`（若仍在 path 上）
+- `/grpc-tunnel` → `127.0.0.1:8010`（grpc-ws-tunnel）
+- 其他 → `127.0.0.1:8008`（Dashboard WS）
+
+### Agent
+
+见 [AGENT.choreo.md](./AGENT.choreo.md)。
 
 ```yaml
-endpoints:
-  - name: nezha
-    port: 8008
-    type: REST
-    networkVisibilities:
-      - Public
-
-  - name: nezha_ws
-    port: 8009
-    type: WS
-    networkVisibilities:
-      - Public
+server: wss://nezha.example.com/default/nezha/nezha_ws/v1.0/grpc-tunnel
+client_secret: YOUR_SECRET
+tls: false
 ```
 
-> Choreo 不支持同一个 Public endpoint 同时承载 REST、WebSocket、gRPC。Nezha 自身虽然在 8008 支持 HTTP/WS/gRPC 多路复用，但在 Choreo 上必须拆分。
+一键安装：
 
-## 文件结构
+```bash
+curl -L https://raw.githubusercontent.com/smgc-cc/choreo-nezha/main/agent/install.sh -o agent.sh \
+  && chmod +x agent.sh \
+  && env \
+    NZ_SERVER=wss://nezha.example.com/default/nezha/nezha_ws/v1.0/grpc-tunnel \
+    NZ_TLS=false \
+    NZ_CLIENT_SECRET=$2 \
+    NZ_UUID=$uuid \
+    ./agent.sh
+```
+
+### 验证
+
+```bash
+# 注入（应看到 WebSocket 脚本与 nezha_ws 前缀）
+curl -sS "https://nezha.example.com/" | grep -oE "window.WebSocket|nezha_ws" | head -5
+
+# HTTP
+curl -sS "https://nezha.example.com/api/v1/server" | head -c 200; echo
+
+# Agent 隧道（期望 101 或业务关闭，不要 530 HTML）
+curl --http1.1 -sS -D- -o /dev/null -m 12 \
+  -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" \
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  "https://nezha.example.com/default/nezha/nezha_ws/v1.0/grpc-tunnel" | head -12
+```
+
+浏览器 DevTools → WS：路径应带 `/default/nezha/nezha_ws/v1.0/...`。
+
+---
+
+## 模式二：全流量 Worker（备选）
+
+文件：`worker/_worker_standalone.js`
 
 ```text
-choreo-nezha/
-├── Dockerfile                        # Choreo 专用 Dockerfile
-├── worker/
-│   ├── _snippet.js                   # Cloudflare Snippet (混合模式 HTTP)
-│   ├── _worker.js                    # Cloudflare Worker  (混合模式 WS)
-│   ├── _worker_standalone.js         # Cloudflare Worker  (独立模式)
-│   └── cloudflare-worker.js          # 同 _worker_standalone.js (兼容旧引用)
-├── .choreo/
-│   └── component.yaml                # Choreo endpoint 配置
-├── script/
-│   ├── backup.sh                     # R2/WebDAV 备份与恢复
-│   ├── entrypoint.sh                 # 容器启动脚本
-│   ├── crontab                       # 定时备份任务
-│   ├── Caddyfile                     # WS 分流代理
-├── agent/
-│   └── apply-choreo-ws-tunnel.sh     # patched 外部 Agent 自动构建脚本
-│   └── grpc-ws-tunnel.go             # gRPC-over-WebSocket 隧道
-│   └── install.sh                    # agent 一键安装脚本
-├── AGENT_CHOREO.md                   # 外部 patched Agent 说明
-└── README.choreo.md                  # 本文档
+nezha.example.com（Worker 自定义域）
+├── HTTP → Worker → Choreo REST 前缀
+└── WS   → Worker → Choreo WS 前缀 → Caddy
 ```
 
-## 部署到 Choreo
+### 何时用
+
+- 没有 Snippet
+- 可接受 Workers **日请求额度**（页面、静态资源也计次）
+
+### 部署
+
+1. Create Worker，粘贴 `_worker_standalone.js`，改 `CHOREO_ORIGIN` / 前缀
+2. 绑定自定义域名
+
+### Agent
+
+短路径即可（Worker 补 WS 前缀）：
+
+```yaml
+server: wss://nezha.example.com/grpc-tunnel
+tls: false
+```
+
+生产更推荐模式一（HTTP 走 Snippet，WS 穿透不计 Worker 请求）。
+
+---
+
+## Choreo 组件
 
 ### 1. 创建 Service Component
-
-在 Choreo Console 创建 Service Component，并连接本仓库。
 
 构建配置：
 
@@ -117,9 +181,9 @@ Dockerfile Path: Dockerfile
 Component Directory: /
 ```
 
-### 2. 配置 endpoint
+### 2. Endpoint
 
-仓库已包含 `.choreo/component.yaml`。需要保留两个 Public endpoint：
+仓库已包含 `.choreo/component.yaml`：
 
 | endpoint | 端口 | 类型 | 用途 |
 |---|---:|---|---|
@@ -128,9 +192,9 @@ Component Directory: /
 
 不要增加 Public `GRPC` endpoint。Choreo 的 `GRPC` endpoint 只能是 `Project` visibility，不能作为公网 Agent 入口。
 
-### 3. 配置环境变量
+> Choreo 不支持同一个 Public endpoint 同时承载 REST、WebSocket、gRPC。Nezha 自身虽然在 8008 支持 HTTP/WS/gRPC 多路复用，但在 Choreo 上必须拆分。
 
-最小推荐配置：
+### 3. 环境变量（最小推荐）
 
 ```bash
 NZ_AGENTSECRETKEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -138,7 +202,7 @@ NEZHA_ENABLE_LOCAL_AGENT=true
 NEZHA_LOCAL_AGENT_UUID=11111111-1111-1111-1111-111111111111
 ```
 
-如果使用 R2：
+R2：
 
 ```bash
 BACKUP_BACKEND=r2
@@ -148,7 +212,7 @@ R2_ENDPOINT_URL=https://your-account-id.r2.cloudflarestorage.com
 R2_BUCKET_NAME=nezha-backup
 ```
 
-如果使用 WebDAV：
+WebDAV：
 
 ```bash
 BACKUP_BACKEND=webdav
@@ -159,66 +223,42 @@ WEBDAV_PASSWORD=your-app-password
 
 ### 4. 部署
 
-1. 在 Choreo 点击 **Build Latest**
-2. 构建成功后部署到 Development 或 Production 环境
-3. 记录 Choreo 生成的 Public URL，例如：
+1. Choreo **Build Latest** → 部署
+2. 记录 Public URL，例如：
 
 ```text
 https://xxxx-dev.e1-us-east-azure.choreoapis.dev/default/nezha/v1.0
 ```
 
-### 5. 部署 Cloudflare 代理
+3. 绑定自定义域到组件
+4. 按上文部署 Snippet（模式一）或 Worker（模式二）
 
-Choreo Public URL 会强制带路径前缀，例如 `/default/nezha/v1.0`。Nezha Dashboard 期望从 `/` 提供页面，因此需要 Cloudflare 层去掉/补齐路径前缀。
+---
 
-#### 方式 A: Snippet + Worker 混合（推荐）
+## 文件结构
 
-> Snippet 免费无限，Worker 仅处理 WS 握手（1 req/连接），大幅降低 Worker 请求用量。
-
-**步骤 1 — 部署 Snippet:**
-
-1. Cloudflare Dashboard → Rules → Snippets → Create Snippet
-2. 粘贴 `worker/_snippet.js`，修改顶部配置：
-
-```js
-const CHOREO_ORIGIN = "xxxx-dev.e1-us-east-azure.choreoapis.dev";
-const HTTP_PATH_PREFIX = "/default/nezha/v1.0";
+```text
+choreo-nezha/
+├── Dockerfile
+├── worker/
+│   ├── _snippet.js                   # 模式一 Snippet（推荐）
+│   └── _worker_standalone.js         # 模式二 全流量 Worker
+├── .choreo/
+│   └── component.yaml
+├── script/
+│   ├── backup.sh
+│   ├── entrypoint.sh
+│   ├── crontab
+│   └── Caddyfile                     # WS 前缀剥离 + /grpc-tunnel 分流
+├── agent/
+│   ├── apply-choreo-ws-tunnel.sh
+│   ├── grpc-ws-tunnel.go
+│   └── install.sh
+├── AGENT.choreo.md
+└── README.choreo.md
 ```
 
-3. 关联到主域名，例如 `nezha.example.com`
-
-**步骤 2 — 部署 Worker:**
-
-1. Cloudflare Dashboard → Workers & Pages → Create Worker
-2. 粘贴 `worker/_worker.js`，修改顶部配置：
-
-```js
-const CHOREO_ORIGIN = "xxxx-dev.e1-us-east-azure.choreoapis.dev";
-const WS_PATH_PREFIX = "/default/nezha/nezha_ws/v1.0";
-```
-
-3. 在 Worker Settings → Triggers 中绑定自定义域名 `ws.nezha.example.com`
-4. 确保 `ws.nezha.example.com` DNS 开启 Cloudflare 代理（橙色云朵）
-
-**步骤 3 — 外部 Agent 配置:**
-
-外部 Agent 的 `-s` 参数使用 `ws.` 域名：
-
-```yaml
-server: wss://ws.nezha.example.com/grpc-tunnel
-```
-
-#### 方式 B: 独立 Worker
-
-使用 `worker/_worker_standalone.js`（或 `worker/cloudflare-worker.js`），修改顶部配置：
-
-```js
-const CHOREO_ORIGIN = "xxxx-dev.e1-us-east-azure.choreoapis.dev";
-const HTTP_PATH_PREFIX = "/default/nezha/v1.0";
-const WS_PATH_PREFIX = "/default/nezha/nezha_ws/v1.0";
-```
-
-然后在 Cloudflare Worker 绑定自定义域名，例如 `nezha.example.com`。
+---
 
 ## 环境变量说明
 
@@ -281,6 +321,8 @@ agent_secret_key: ${NZ_AGENTSECRETKEY}
 ```
 
 这样可以避免 R2/WebDAV 恢复出的旧 `config.yaml` 覆盖当前环境变量中的 `NZ_AGENTSECRETKEY`。
+
+---
 
 ## 备份与恢复
 
@@ -375,16 +417,13 @@ BACKUP_BACKEND=disabled
 cat /tmp/backup.log
 ```
 
+---
+
 ## 内置 Agent
 
-`Dockerfile.choreo` 会从 `https://github.com/nezhahq/agent` 拉取最新 tag，构建上游原版 `nezha-agent`，并注入上游版本号：
+Dockerfile 会从 `https://github.com/nezhahq/agent` 拉取最新 tag，构建上游原版 `nezha-agent`。
 
-```dockerfile
--X github.com/nezhahq/agent/pkg/monitor.Version=${VERSION}
--X main.arch=$(go env GOARCH)
-```
-
-启用内置 Agent：
+启用：
 
 ```bash
 NZ_AGENTSECRETKEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -407,26 +446,20 @@ uuid: ${NEZHA_LOCAL_AGENT_UUID}
 
 注意：
 
-- 内置 Agent 不走 Worker、不走 `/grpc-tunnel`
+- 内置 Agent 不走边缘、不走 `/grpc-tunnel`
 - 内置 Agent 不需要 patched WebSocket agent
 - `NEZHA_LOCAL_AGENT_UUID` 建议固定，否则 `/tmp` 丢失后可能注册成新机器
 
+---
+
 ## 外部 Agent
 
-由于 Choreo 不支持 Public gRPC endpoint，外部 Agent 需要使用 patched 版本，通过 WebSocket 连接：
+由于 Choreo 不支持 Public gRPC endpoint，外部 Agent 需要使用 **patched** 版本，通过 WebSocket 连接。
 
-```yaml
-server: wss://nezha.example.com/grpc-tunnel
-client_secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-tls: false
-update_repo: smgc-cc/choreo-nezha
-```
-
-一键安装脚本
-
-```bash
-curl -L https://raw.githubusercontent.com/smgc-cc/choreo-nezha/main/agent/install.sh -o agent.sh && chmod +x agent.sh && env NZ_SERVER=wss://nezha.example.com/grpc-tunnel NZ_TLS=false NZ_CLIENT_SECRET=$2 NZ_UUID=$uuid ./agent.sh
-```
+| 模式 | `server` |
+|---|---|
+| 模式一 Snippet | `wss://nezha.example.com/default/nezha/nezha_ws/v1.0/grpc-tunnel` |
+| 模式二 Worker | `wss://nezha.example.com/grpc-tunnel` |
 
 ### 关于 `NZ_AGENTSECRETKEY` 和 `NZ_CLIENT_SECRET`
 
@@ -458,11 +491,9 @@ NZ_CLIENT_SECRET=$2
 
 两个 secret 都会被 Dashboard 接受认证，但归属的用户不同。
 
-更多说明见：
+更多说明见 [AGENT.choreo.md](./AGENT.choreo.md)。
 
-```text
-AGENT_CHOREO.md
-```
+---
 
 ## 运行时数据路径
 
@@ -479,11 +510,29 @@ AGENT_CHOREO.md
 
 Choreo 容器重启或重新部署时 `/tmp` 可能丢失，因此必须依赖 R2/WebDAV 恢复。
 
+---
+
 ## 故障排查
+
+| 现象 | 处理 |
+|---|---|
+| 页面 404 | Snippet/Worker 的 `HTTP_PATH_PREFIX` 与 Choreo REST 路径不一致 |
+| 无 WebSocket 注入 | Snippet 未匹配域名 / 未部署 |
+| WS 无 `nezha_ws` 前缀 | 注入未生效；或模式二应用了短路径但走的是穿透 |
+| 模式一 Agent 连不上 | `server` 是否带 `/default/nezha/nezha_ws/v1.0/grpc-tunnel` |
+| WS 530 HTML | 域名未橙云 / 未绑 Choreo 自定义域 / WebSockets 未开 |
+| Dashboard Oops / Blocked | 清 `status.sfun.cc` 的 cookie 后重登；仍 Blocked 则解 WAF IP |
+| 终端立刻 Session completed | 多域名：Snippet 注入 `?token=`；确认会话有效且 RealIP 稳定 |
+| 终端鉴权失败 | 是否同源；同父域可 `COOKIE_DOMAIN`；跨注册域用原生 `?token=` |
+| 外部 Agent 525 / text/plain | 打到了 CF/Choreo 错误页；确认 patched agent + `wss://.../grpc-tunnel` |
+| 内置 Agent 没出现 | `NEZHA_ENABLE_LOCAL_AGENT=true` 且 secret/uuid 已设 |
+| 备份未执行 | `cat /tmp/backup.log` 与 `BACKUP_BACKEND` 相关变量 |
+| 恢复后 Agent secret 不一致 | entrypoint 会 `sync_agent_secret_key`；确认环境变量未变 |
+| Worker 额度打满 | 改回模式一 |
 
 ### 页面 404
 
-通常是 Choreo 路径前缀问题。确认 Cloudflare Worker 中：
+确认 Snippet/Worker 中：
 
 ```js
 const HTTP_PATH_PREFIX = "/default/nezha/v1.0";
@@ -493,101 +542,105 @@ const HTTP_PATH_PREFIX = "/default/nezha/v1.0";
 
 ### WebSocket 连接失败
 
-**独立 Worker 模式:**
+**模式一:**
 
-确认：
+1. Snippet 已部署且匹配面板域名
+2. 浏览器 WS URL 含 `/default/nezha/nezha_ws/v1.0`
+3. Cloudflare WebSockets On；域名橙云；Choreo 已绑自定义域
+4. 容器 Caddy 能剥前缀并转发
+
+**模式二:**
 
 ```js
 const WS_PATH_PREFIX = "/default/nezha/nezha_ws/v1.0";
 ```
 
-**混合模式:**
-
-确认：
-1. Worker 已绑定 `ws.{host}` 自定义域名
-2. DNS 记录开启 Cloudflare 代理（橙色云朵）
-3. Worker 中的 `WS_PATH_PREFIX` 正确
-
-并确认 `.choreo/component.yaml` 中 `nezha_ws` endpoint 是：
-
-```yaml
-type: WS
-port: 8009
-```
+并确认 `.choreo/component.yaml` 中 `nezha_ws` 为 `type: WS` / `port: 8009`。
 
 ### 外部 Agent 报 525 或 content-type text/plain
 
-说明 Agent 打到了 Cloudflare/Choreo 错误页面，不是 Nezha gRPC 服务。
-
-外部 Agent 应使用 patched choreo-agent，并配置：
+说明 Agent 打到了 Cloudflare/Choreo 错误页面，不是隧道。
 
 ```yaml
-server: wss://你的域名/grpc-tunnel
+server: wss://你的域名/default/nezha/nezha_ws/v1.0/grpc-tunnel   # 模式一
+# 或
+server: wss://你的域名/grpc-tunnel                               # 模式二
 tls: false
 ```
 
 不要使用原生 gRPC 地址连接 Choreo Public URL。
 
-### 内置 Agent 没出现
-
-检查环境变量：
-
-```bash
-NEZHA_ENABLE_LOCAL_AGENT=true
-NZ_AGENTSECRETKEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-NEZHA_LOCAL_AGENT_UUID=11111111-1111-1111-1111-111111111111
-```
-
-检查日志中是否有：
-
-```text
-Starting bundled Nezha Agent...
-Connection to 127.0.0.1:8008 established
-```
-
-### 备份未执行
-
-检查：
-
-```bash
-cat /tmp/backup.log
-```
-
-R2 模式检查：
-
-```bash
-echo $BACKUP_BACKEND
-echo $R2_ENDPOINT_URL
-echo $R2_BUCKET_NAME
-```
-
-WebDAV 模式检查：
-
-```bash
-echo $BACKUP_BACKEND
-echo $WEBDAV_URL
-echo $WEBDAV_USERNAME
-```
-
-### 恢复后 Agent secret 不一致
-
-当前 entrypoint 会在 restore 后执行 `sync_agent_secret_key`，把 `/tmp/config.yaml` 中的 `agent_secret_key` 同步为 `NZ_AGENTSECRETKEY`。
-
-如果仍异常，确认 Choreo 环境变量中 `NZ_AGENTSECRETKEY` 没有变化。
+---
 
 ## 限制与注意事项
 
 - `/tmp` 非持久化，最多可能丢失两次备份之间的数据
 - TSDB 数据可能较大，WebDAV 上传可能比 R2 慢
-- Public gRPC 在 Choreo 不可用，外部 Agent 必须走 `/grpc-tunnel`
+- Public gRPC 在 Choreo 不可用，外部 Agent 必须走 `/grpc-tunnel`（patched）
 - 内置 Agent 只代表 Choreo 容器本身，不代表外部服务器
 - 建议固定 `NZ_AGENTSECRETKEY` 和 `NEZHA_LOCAL_AGENT_UUID`
+- 模式一 **不需要** Worker；模式二才部署 `_worker_standalone.js`
+
+---
+
+## 对比
+
+| | 模式一 Snippet | 模式二 Worker |
+|---|---|---|
+| Agent `server` | **长** `wss://.../nezha_ws/v1.0/grpc-tunnel` | **短** `wss://.../grpc-tunnel` |
+| 边缘费用 | HTTP≈免费；WS 穿透 | 全流量计 Workers |
+| 终端 cookie | 同源 host-only | 同源 Cookie |
+| 推荐 | **生产默认** | 无 Snippet / 图简单时 |
+
+---
+
+## 附录：Snippets 多域名特例（可选，非必须）
+
+仅当 **面板入口域名** 与 **Choreo 绑定域名** 不是同一个时使用（例如品牌域经 SaaS、snippets 基建域在另一 zone）。
+
+示例（与本仓库线上一致时可对照）：
+
+| 角色 | 主机 |
+|---|---|
+| 浏览器入口（Snippet） | `nezha.example.com` |
+| Choreo 绑定 + Agent + WS 穿透 | `nezha.snippet.com` |
+
+Snippet：
+
+```javascript
+const WS_PUBLIC_HOST = "nezha.snippet.com"; // 浏览器 WS 改到基建域
+const COOKIE_DOMAIN = ""; // 跨注册域无法共享 cookie，保持空
+```
+
+匹配规则加上 **入口域 + 基建域** 两个 host（基建域若也出 HTML，需同样挂 Snippet 或可只访问入口域）。
+
+影响：
+
+- 浏览器 WS 在基建域；**跨注册域 cookie 带不过去**
+- 终端 / 文件管理 WS：Snippet 仅在 `/dashboard/terminal*` 等页注入，并用 Nezha 原生 `?token=`（`TokenLookup` 已支持）
+- HTML 带 `Cache-Control: no-store`
+- Agent 建议：  
+  `server: wss://nezha.snippet.com/default/nezha/nezha_ws/v1.0/grpc-tunnel`
+- 日常从入口域登录并打开终端；勿在未登录的基建域直接开终端页
+
+故障对照：
+
+| 现象 | 原因 |
+|---|---|
+| Dashboard **Oops / unexpected error** | 浏览器带着**失效** `nz-jwt` 请求 `/api/v1/setting` 等；Nezha `fallbackAuth` 会 `BlockIP` 并返回 **Blocked HTML**（`you were blocked by nezha WAF`），前端当 JSON 解析失败。处理：清站点 cookie 后重新登录；若仍 403 Blocked，在 WAF 封禁列表解封你的 IP，或等封锁窗口过期 |
+| 打开终端立刻 Session completed | WS 到基建域无登录态：需多域名 Snippet 注入 `?token=`；或会话因 **IP 绑定**失败（JWT session 绑定登录时 RealIP） |
+| 入口域裸 WS 530 | 正常：入口域未绑 Choreo，WS 必须走 `WS_PUBLIC_HOST` |
+| Agent 在线但终端不行 | Agent 走 `/grpc-tunnel` 不依赖浏览器 cookie；终端 WS 要鉴权 |
+
+**默认部署不必多域名。** 能单域名绑 Choreo 时，优先单域名（`WS_PUBLIC_HOST = ""`），无需 `?token=` query。
+
+---
 
 ## 相关文档
 
-- `AGENT_CHOREO.md`：外部 patched Agent 自动构建与使用说明
+- [AGENT.choreo.md](./AGENT.choreo.md)：外部 patched Agent 构建与使用
 - `.choreo/component.yaml`：Choreo endpoint 配置
-- `worker/_snippet.js`：Cloudflare Snippet（混合模式 HTTP）
-- `worker/_worker.js`：Cloudflare Worker（混合模式 WS）
-- `worker/_worker_standalone.js`：Cloudflare Worker（独立模式）
+- `worker/_snippet.js`：模式一 Snippet（推荐）
+- `worker/_worker_standalone.js`：模式二全流量 Worker
+- `script/Caddyfile`：WS 前缀剥离与 `/grpc-tunnel` 分流
 - `script/backup.sh`：R2/WebDAV 备份脚本
