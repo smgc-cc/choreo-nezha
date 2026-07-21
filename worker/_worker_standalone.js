@@ -1,25 +1,25 @@
 /**
- * Cloudflare Worker for Nezha on Choreo
+ * Cloudflare Worker for Nezha on Choreo（模式二：全流量 Worker）
  *
- * 用于将 Nezha 部署到 Choreo 时，通过 Cloudflare Worker 实现路由代理。
- * 解决 Choreo 强制添加路径前缀的问题。
+ * 备选方案。生产更推荐模式一：worker/_snippet.js
+ * （HTTP 走 Snippet，WS 原生穿透，无 Worker）。
+ *
+ * 本文件处理全部 HTTP + WebSocket，按协议分别补 Choreo 路径前缀。
+ * 与模式一互斥：同一域名不要再挂 Snippet。
  *
  * 架构:
- * - Nezha Dashboard 运行在 8008 端口
  * - Choreo REST 端点 (8008) → Nezha Dashboard
  * - Choreo WS 端点 (8009) → Caddy
  *   - /grpc-tunnel → grpc-ws-tunnel → Nezha gRPC
  *   - 其他 WS → Nezha Dashboard WebSocket
- * - Cloudflare Worker → 去除 Choreo 路径前缀 → Choreo 端点
  *
- * 部署步骤:
- * 1. 在 Cloudflare Dashboard → Workers & Pages → Create Worker
- * 2. 粘贴此代码并部署
- * 3. 修改下方的 CHOREO_ORIGIN 和 HTTP_PATH_PREFIX
- * 4. 在 Worker Settings → Triggers 中绑定自定义域名
- * 5. 确保域名 DNS 记录开启 Cloudflare 代理（橙色云朵）
+ * 部署:
+ * 1. Workers & Pages → Create Worker，粘贴本文件
+ * 2. 修改 CHOREO_ORIGIN / HTTP_PATH_PREFIX / WS_PATH_PREFIX
+ * 3. Triggers 绑定自定义域名；DNS 橙云
  *
- * 注意: 必须绑定自定义域名才能正常工作
+ * Agent（短路径）:
+ *   server: wss://nezha.example.com/grpc-tunnel
  */
 
 // ============ 配置区域 ============
