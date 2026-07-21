@@ -1,14 +1,35 @@
+# Caddy :8009 (Choreo WS) → Nezha :8008 / grpc-ws-tunnel :8010
+#
+# 模式一（Snippet-only）原生穿透时，path 可能仍带网关前缀：
+#   /default/nezha/nezha_ws/v1.0/grpc-tunnel
+#   /default/nezha/nezha_ws/v1.0/api/...
+# 也可能已被网关剥掉。两种都要认。
+#
+# Worker 回源（模式二 / 旧混合模式）通常已是剥前缀后的路径。
+
 {
-    auto_https off
-    admin off
+	auto_https off
+	admin off
 }
 
 :8009 {
-    @grpcTunnel path /grpc-tunnel
-    reverse_proxy @grpcTunnel 127.0.0.1:8010
+	# 1) 剥掉 Choreo WS 网关前缀（若仍在 path 上）
+	@ws_prefixed path_regexp ws_pref ^/default/nezha/nezha_ws/v1\.0(/.*)$
+	rewrite @ws_prefixed {re.ws_pref.1}
 
-    reverse_proxy 127.0.0.1:8008 {
-        header_up Host {http.reverse_proxy.upstream.hostport}
-        header_up -Origin
-    }
+	# 2) 外部 patched Agent：gRPC-over-WebSocket 隧道
+	@grpcTunnel path /grpc-tunnel
+	handle @grpcTunnel {
+		reverse_proxy 127.0.0.1:8010 {
+			header_up -Origin
+		}
+	}
+
+	# 3) 前端 WebSocket 等 → Dashboard
+	handle {
+		reverse_proxy 127.0.0.1:8008 {
+			header_up Host {http.reverse_proxy.upstream.hostport}
+			header_up -Origin
+		}
+	}
 }
