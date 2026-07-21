@@ -16,25 +16,81 @@ Patch 做两件事：
 - `server` 支持 `ws://` / `wss://`：agent 仍使用原生 gRPC API，但底层 transport 走 WebSocket `net.Conn`。
 - 自动更新默认改为检查 `smgc-cc/choreo-nezha` release，避免自定义 agent 被官方 release 覆盖。
 
-## Agent 配置示例
+## 模式一（推荐）：Snippet
+
+面板域名与 Choreo 自定义域为 **同一主机**，WS 原生穿透：
 
 ```yaml
-server: wss://nezha.example.com/grpc-tunnel
+# https 域名 + Choreo WS 前缀 + /grpc-tunnel（写 wss://）
+server: wss://nezha.example.com/default/nezha/nezha_ws/v1.0/grpc-tunnel
 client_secret: your-client-secret
-# server 使用 wss:// 时，TLS 配置只作用在 WebSocket URL 本身；gRPC 内层使用 insecure transport。
+# server 使用 wss:// 时，TLS 只作用在 WebSocket URL 本身；gRPC 内层 insecure
 tls: false
-# 可选；patch 默认就是 smgc-cc/choreo-nezha。
+# 可选；patch 默认就是 smgc-cc/choreo-nezha
 update_repo: smgc-cc/choreo-nezha
 ```
 
-也可以用环境变量：
+环境变量：
 
 ```bash
-NZ_SERVER=wss://nezha.example.com/grpc-tunnel
+NZ_SERVER=wss://nezha.example.com/default/nezha/nezha_ws/v1.0/grpc-tunnel
 NZ_CLIENT_SECRET=your-client-secret
 NZ_TLS=false
 NZ_UPDATE_REPO=smgc-cc/choreo-nezha
 ```
+
+| 流量 | 请求 | 边缘 |
+|---|---|---|
+| Agent WS | `wss://.../default/nezha/nezha_ws/v1.0/grpc-tunnel` | 原生穿透 → Choreo WS → Caddy → grpc-ws-tunnel |
+| 浏览器 WS | 注入补同一 `nezha_ws` 前缀 | 同上（不经 Worker） |
+| 浏览器 HTTP | Snippet 补 REST 前缀 | Snippet |
+
+要求：Snippet 匹配该域名；Choreo 已绑自定义域；Cloudflare **WebSockets = On**。
+
+### 一键安装示例
+
+```bash
+curl -L https://raw.githubusercontent.com/smgc-cc/choreo-nezha/main/agent/install.sh -o agent.sh \
+  && chmod +x agent.sh \
+  && env \
+    NZ_SERVER=wss://nezha.example.com/default/nezha/nezha_ws/v1.0/grpc-tunnel \
+    NZ_TLS=false \
+    NZ_CLIENT_SECRET=$2 \
+    NZ_UUID=$uuid \
+    ./agent.sh
+```
+
+### 验证
+
+```bash
+HOST=nezha.example.com
+PREFIX=/default/nezha/nezha_ws/v1.0
+
+curl --http1.1 -sS -D- -o /dev/null -m 12 \
+  -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" \
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  "https://${HOST}${PREFIX}/grpc-tunnel" | head -15
+```
+
+期望：`101` 或业务侧关闭（非 530 HTML / 525）。
+
+## 模式二：全流量 Worker
+
+Worker 按协议补 REST / WS 前缀时，可用短路径：
+
+```yaml
+server: wss://nezha.example.com/grpc-tunnel
+tls: false
+```
+
+## 不要
+
+| 写法 | 原因 |
+|---|---|
+| 模式一写 `wss://host/grpc-tunnel`（无 `nezha_ws` 前缀） | 穿透后进不了 Choreo WS endpoint |
+| 官方 agent + 原生 gRPC `host:8008` | Choreo 无 Public gRPC |
+| `-e` / `server` 写成 `https://` 却期望 gRPC-WS | Nezha patched agent 认 `ws://` / `wss://` |
 
 ## 手动触发构建
 
@@ -46,4 +102,8 @@ NZ_UPDATE_REPO=smgc-cc/choreo-nezha
 
 ## 注意
 
-Choreo 服务端仍需要一个 Public WS endpoint，并在容器内把 `/grpc-tunnel` WebSocket 隧道转发到 Nezha 原生 `127.0.0.1:8008`。Cloudflare Worker 只做 WS 代理，不解析 gRPC。
+- Choreo 服务端需要 Public **WS** endpoint；容器内 `/grpc-tunnel` → `grpc-ws-tunnel` → `127.0.0.1:8008`。
+- **模式一不需要 Cloudflare Worker**；Worker 只在模式二做路径代理，不解析 gRPC。
+- 内置 Agent 仍直连 `127.0.0.1:8008`，不走 `/grpc-tunnel`。
+
+完整部署见 [README.choreo.md](./README.choreo.md)。
