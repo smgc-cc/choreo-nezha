@@ -5,7 +5,9 @@
 #   /default/nezha/nezha_ws/v1.0/api/...
 # 也可能已被网关剥掉。两种都要认。
 #
-# Worker 回源（模式二 / 旧混合模式）通常已是剥前缀后的路径。
+# 多域名终端/文件 WS:
+#   Snippet 注入 ?nz_jwt=...（跨注册域 cookie 带不过去）
+#   此处把 query 转成 Cookie: nz-jwt=...，Nezha 只认 Cookie
 
 {
 	auto_https off
@@ -17,7 +19,33 @@
 	@ws_prefixed path_regexp ws_pref ^/default/nezha/nezha_ws/v1\.0(/.*)$
 	rewrite @ws_prefixed {re.ws_pref.1}
 
-	# 2) 外部 patched Agent：gRPC-over-WebSocket 隧道
+	# 2) 终端 WS + nz_jwt query → Cookie
+	@term_jwt {
+		path_regexp term ^/api/v1/ws/terminal/([^/]+)/?$
+		query nz_jwt=*
+	}
+	handle @term_jwt {
+		reverse_proxy 127.0.0.1:8008 {
+			header_up Host {http.reverse_proxy.upstream.hostport}
+			header_up Cookie "nz-jwt={query.nz_jwt}"
+			header_up -Origin
+		}
+	}
+
+	# 3) 文件 WS + nz_jwt query → Cookie
+	@file_jwt {
+		path_regexp file ^/api/v1/ws/file/([^/]+)/?$
+		query nz_jwt=*
+	}
+	handle @file_jwt {
+		reverse_proxy 127.0.0.1:8008 {
+			header_up Host {http.reverse_proxy.upstream.hostport}
+			header_up Cookie "nz-jwt={query.nz_jwt}"
+			header_up -Origin
+		}
+	}
+
+	# 4) 外部 patched Agent：gRPC-over-WebSocket 隧道
 	@grpcTunnel path /grpc-tunnel
 	handle @grpcTunnel {
 		reverse_proxy 127.0.0.1:8010 {
@@ -25,7 +53,7 @@
 		}
 	}
 
-	# 3) 前端 WebSocket 等 → Dashboard
+	# 5) 前端 WebSocket 等 → Dashboard
 	handle {
 		reverse_proxy 127.0.0.1:8008 {
 			header_up Host {http.reverse_proxy.upstream.hostport}
