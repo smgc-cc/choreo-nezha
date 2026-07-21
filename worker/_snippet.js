@@ -1,42 +1,49 @@
 /**
- * Cloudflare Snippet for Nezha on Choreo (混合模式 - HTTP 部分)
+ * Cloudflare Snippet for Nezha on Choreo（模式一，推荐）
  *
- * 处理所有 HTTP 流量（页面、API、静态资源），WebSocket 交给 Worker 处理。
- * Snippet 在返回 HTML 时注入脚本，将前端 WebSocket 连接重定向到 ws.{当前域名}，
- * 该子域名绑定到 Worker 的 Custom Domain。
+ * 默认：单域名。面板域名 = Choreo 自定义域 = Agent 域名。
+ * WebSocket 不进 Snippet、不经 Worker：注入补 WS 路径前缀后原生穿透。
  *
  * 架构:
- * - HTTP (页面/API/资源) → Snippet → Choreo HTTP 端点 [免费无限额度]
- * - WS (前端实时数据)    → ws.{host} (Worker Custom Domain) → Choreo WS 端点
- * - Agent gRPC tunnel   → ws.{host} /grpc-tunnel → Choreo WS 端点
+ * - HTTP → Snippet → CHOREO_ORIGIN + REST 前缀
+ * - WS   → 不进 Snippet；注入补 WS 路径前缀；WS_PUBLIC_HOST 空则同源
+ * - Agent（patched）:
+ *     server: wss://面板域名/default/nezha/nezha_ws/v1.0/grpc-tunnel
+ *     WSS 原生穿透 → Choreo WS → Caddy → grpc-ws-tunnel → Nezha
  *
- * Cookie 处理:
- * - 上游 Set-Cookie 的 nz-jwt 没有 Domain 属性（只对当前 host 生效）
- * - Snippet 给它加上 Domain=.{host}，使 cookie 对 ws.{host} 子域名也生效
- * - 这样终端等需要登录态的 WS 功能可以正常鉴权
- * - 后端在反代链后面只看到 HTTP，不会设 Secure 标志；Snippet 给所有 cookie
- *   补上 Secure（Chrome 要求 SameSite=None 必须搭配 Secure，否则静默丢弃）
+ * 多域名（面板入口 ≠ Choreo 绑定域）:
+ * - WS_PUBLIC_HOST = Choreo 已绑定域名
+ * - 跨注册域无法共享 cookie → 仅终端/文件页注入 JWT
+ * - 浏览器 WS 使用 Nezha 原生 query: token（TokenLookup 已支持，无需 Caddy 转 Cookie）
  *
- * 配套:
- * - _worker.js: 部署为 Worker，添加 Custom Domain: ws.{host}
- * - _snippet.js: 部署为 Snippet
+ * Cookie:
+ * - 单域名默认 host-only，终端等需登录态的 WS 同源即可带 nz-jwt
+ * - 同父域跨子域可设 COOKIE_DOMAIN；跨注册域请用 query: token
+ * - 反代后上游常看不到 HTTPS，给 cookie 补 Secure
+ * - 注意：失效 nz-jwt 在可选鉴权接口上可能触发 Nezha WAF 封锁页（Blocked HTML），
+ *   前端会 Oops。清站点 cookie 后重新登录即可；必要时在后台解封 IP
  *
- * 部署步骤:
- * 1. 在 Cloudflare Dashboard → Rules → Snippets → Create Snippet
- * 2. 粘贴此代码并部署，关联到主域名
- * 3. 修改下方的 CHOREO_ORIGIN 和 HTTP_PATH_PREFIX
- * 4. 配合 _worker.js 部署 Worker 并绑定 ws.{host} Custom Domain
+ * 备选：全流量 Worker → _worker_standalone.js
  */
 
 // ============ 配置区域 ============
-// 请根据你的 Choreo 部署修改以下配置
 
 const CHOREO_ORIGIN = "uuid-dev.e1-us-east-azure.choreoapis.dev";
 const HTTP_PATH_PREFIX = "/default/nezha/v1.0";
+const WS_PATH_PREFIX = "/default/nezha/nezha_ws/v1.0";
+// 单域名：留空 = WebSocket 与页面同 host（推荐）
+// 多域名特例：填 Choreo 已绑定的域名，例如 "nezha.snippet.com"
+const WS_PUBLIC_HOST = "";
+// 一般保持空（host-only）。同父域跨子域时可填 ".example.com"
+// 跨注册域（如 nezha.example.com ↔ nezha.snippet.com）填了也无效，靠 query: token
+const COOKIE_DOMAIN = "";
+// 注入到 HTML 的 JWT 最大长度（异常 cookie 直接丢弃）
+const JWT_MAX_LEN = 4096;
 
 // Dashboard 前端复制的 agent 安装命令来自上游构建产物，无法用 install_host 配置脚本 URL。
 // 这里在 Snippet 层把上游脚本 URL 改成 patched Choreo agent 安装脚本。
-const AGENT_INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/smgc-cc/choreo-nezha/main/agent/install.sh";
+const AGENT_INSTALL_SCRIPT_URL =
+  "https://raw.githubusercontent.com/smgc-cc/choreo-nezha/main/agent/install.sh";
 const UPSTREAM_AGENT_INSTALL_PATTERNS = [
   /https:\/\/raw\.githubusercontent\.com\/nezhahq\/scripts\/[^\s'"`<>]+\/(?:agent\/)?install(?:_en)?\.sh/g,
   /https:\/\/gitee\.com\/naibahq\/scripts\/raw\/[^\s'"`<>]+\/(?:agent\/)?install\.sh/g,
@@ -45,49 +52,128 @@ const UPSTREAM_AGENT_INSTALL_PATTERNS = [
   /https:\/\/testingcf\..jsdelivr\.net\/gh\/nezhahq\/scripts@[^\s'"`<>]+\/(?:agent\/)?install(?:_en)?\.sh/g,
 ];
 
-// 注入到 HTML 的脚本: 根据当前访问域名自动推导 WS 域名 (ws. 前缀)
-const WS_INJECT_SCRIPT = `<script>
+// ============ 注入脚本 ============
+
+/**
+ * @param {string} jwtToken 仅多域名 + 终端/文件页时非空；其它页为 ""
+ */
+function buildWsInjectScript(jwtToken) {
+  return `<script>
 (function(){
+  var P=${JSON.stringify(WS_PATH_PREFIX)};
+  var H=${JSON.stringify(WS_PUBLIC_HOST)};
+  var T=${JSON.stringify(jwtToken || "")};
   var O=window.WebSocket;
   window.WebSocket=function(u,p){
-    var o=new URL(u);
-    o.host="ws."+location.host;
-    return p!==void 0?new O(o+"",p):new O(o+"");
+    var o=new URL(u,location.href);
+    // 同源、显式 WS 公共域、或旧 ws. 子域 → 统一改写到目标 host + 补路径前缀
+    if(o.host===location.host||(H&&o.host===H)||o.host===("ws."+location.host)){
+      o.host=H||location.host;
+      if(P&&o.pathname.indexOf(P)!==0){
+        o.pathname=P.replace(/\\/$/,"")+o.pathname;
+      }
+      // 跨域 WS 带不上 nz-jwt cookie。
+      // Nezha TokenLookup = "header: Authorization, query: token, cookie: nz-jwt"
+      // 终端/文件 WS 用原生 query: token
+      if(T&&H&&H!==location.host&&!o.searchParams.get("token")){
+        if(o.pathname.indexOf("/api/v1/ws/terminal/")!==-1||o.pathname.indexOf("/api/v1/ws/file/")!==-1){
+          o.searchParams.set("token",T);
+        }
+      }
+    }
+    return p!==void 0?new O(o.href,p):new O(o.href);
   };
   window.WebSocket.prototype=O.prototype;
   for(var k in{CONNECTING:0,OPEN:1,CLOSING:2,CLOSED:3})window.WebSocket[k]=O[k];
 })();
 </script>`;
+}
 
-// ============ 代码区域 ============
+function readRequestCookie(request, name) {
+  const raw = request.headers.get("Cookie") || "";
+  for (const part of raw.split(";")) {
+    const i = part.indexOf("=");
+    if (i === -1) continue;
+    if (part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return "";
+}
+
+/** JWT / base64url 形态；过长或怪异字符不注入 */
+function sanitizeJwt(token) {
+  if (!token) return "";
+  if (token.length > JWT_MAX_LEN) return "";
+  if (!/^[A-Za-z0-9._~\-+/=]+$/.test(token)) return "";
+  return token;
+}
+
+/**
+ * 仅多域名且终端/文件管理页注入 JWT（全页 window.open，可命中）。
+ * 不要在 /dashboard/login 或普通后台页注入，避免 HTML 泄露面扩大。
+ */
+function shouldInjectJwt(path) {
+  if (!(WS_PUBLIC_HOST || "").trim()) return false;
+  if (!path) return false;
+  let p = path;
+  if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);
+  if (p === "/dashboard/terminal" || p.startsWith("/dashboard/terminal/")) return true;
+  if (p === "/dashboard/file" || p.startsWith("/dashboard/file/")) return true;
+  // 部分构建可能用其它文件管理路径
+  if (p === "/dashboard/fm" || p.startsWith("/dashboard/fm/")) return true;
+  return false;
+}
+
+/**
+ * 把浏览器 pathname 归一成 Choreo REST 上游路径。
+ *
+ * 1) 已带 HTTP 前缀 → 原样（防双重前缀）
+ * 2) 误带 WS 前缀 → 换成 HTTP 前缀 + 剩余 path
+ * 3) 裸 /... → 加 HTTP 前缀
+ */
+function toChoreoHttpPath(path) {
+  const http = (HTTP_PATH_PREFIX || "").replace(/\/+$/, "") || "";
+  const ws = (WS_PATH_PREFIX || "").replace(/\/+$/, "") || "";
+  let p = path || "/";
+  if (!p.startsWith("/")) p = "/" + p;
+
+  if (http && (p === http || p.startsWith(http + "/"))) {
+    return p;
+  }
+  if (ws && (p === ws || p.startsWith(ws + "/"))) {
+    const rest = p.slice(ws.length) || "/";
+    return http + (rest.startsWith("/") ? rest : "/" + rest);
+  }
+  return http + p;
+}
+
+// ============ 主处理 ============
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
-    const requestHost = url.hostname; // 当前访问域名，用于 cookie domain
+    const requestHost = url.hostname;
 
-    // 调试端点
-    if (path === '/debug-worker') {
-      return new Response('Nezha Snippet is active! (hybrid mode)', { status: 200 });
+    if (path === "/debug-worker" || path === "/debug-snippet") {
+      return new Response("Nezha Snippet is active! (snippet-only / no worker for WS)", {
+        status: 200,
+      });
     }
 
-    // 请求回显调试端点
-    if (path === '/debug-request') {
+    if (path === "/debug-request") {
       const debugInfo = {
         method: request.method,
         url: request.url,
-        path: path,
+        path,
         search: url.search,
         headers: Object.fromEntries(request.headers.entries()),
       };
       return new Response(JSON.stringify(debugInfo, null, 2), {
         status: 200,
-        headers: { "Content-Type": "application/json" }
+        headers: { "Content-Type": "application/json" },
       });
     }
 
-    // 处理 CORS 预检请求
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -101,28 +187,19 @@ export default {
     }
 
     let method = request.method;
+    if (method === "HEAD" && isSPARoute(path)) method = "GET";
 
-    // Safari HEAD 预取 → 转为 GET（SPA 路由需要完整响应）
-    if (method === 'HEAD' && isSPARoute(path)) {
-      console.log(`[Snippet] Converting HEAD to GET for SPA route: ${path}`);
-      method = 'GET';
-    }
+    const upstreamPath = toChoreoHttpPath(path);
+    const upstreamUrl = `https://${CHOREO_ORIGIN}${upstreamPath}${url.search}`;
 
-    const upstreamUrl = `https://${CHOREO_ORIGIN}${HTTP_PATH_PREFIX}${path}${url.search}`;
-
-    console.log(`[Snippet] ${method} ${path} → ${upstreamUrl}`);
-
-    // 克隆请求头，替换 Host
     const headers = new Headers();
     for (const [key, value] of request.headers.entries()) {
-      if (key.toLowerCase() !== 'host') {
-        headers.set(key, value);
-      }
+      const lk = key.toLowerCase();
+      if (lk !== "host" && lk !== "origin") headers.set(key, value);
     }
-    headers.set('Host', CHOREO_ORIGIN);
-    headers.set('Accept-Encoding', 'identity');
+    headers.set("Host", CHOREO_ORIGIN);
+    headers.set("Accept-Encoding", "identity");
 
-    // 读取请求体
     let body = null;
     if (method !== "GET" && method !== "HEAD") {
       try {
@@ -133,15 +210,13 @@ export default {
     }
 
     try {
-      // 手动处理重定向: 上游的 301 会丢 Choreo 路径前缀
       let response = await fetch(upstreamUrl, {
-        method: method,
-        headers: headers,
-        body: body,
+        method,
+        headers,
+        body,
         redirect: "manual",
       });
 
-      // 处理重定向（最多跟 5 次）
       let redirects = 0;
       while (response.status >= 300 && response.status < 400 && redirects < 5) {
         const location = response.headers.get("Location");
@@ -149,19 +224,17 @@ export default {
 
         let redirectUrl;
         if (location.startsWith("/")) {
-          redirectUrl = `https://${CHOREO_ORIGIN}${HTTP_PATH_PREFIX}${location}`;
+          redirectUrl = `https://${CHOREO_ORIGIN}${toChoreoHttpPath(location)}`;
         } else if (location.startsWith("http")) {
           redirectUrl = location;
         } else {
           redirectUrl = new URL(location, upstreamUrl).href;
         }
 
-        console.log(`[Snippet] Following redirect to: ${redirectUrl}`);
-
         response = await fetch(redirectUrl, {
-          method: method,
-          headers: headers,
-          body: body,
+          method,
+          headers,
+          body,
           redirect: "manual",
         });
         redirects++;
@@ -175,18 +248,17 @@ export default {
       newHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       newHeaders.set("Access-Control-Allow-Headers", "*");
 
-      // 改写 Set-Cookie: 给 nz-jwt 加 Domain=.{host}
-      // 使 cookie 对 ws.{host} 子域名也生效（终端等 WS 功能需要登录态）
       rewriteCookieDomain(response, newHeaders, requestHost);
 
-      // HTML 响应: 注入 WS 重定向脚本 + 替换 agent 安装脚本 URL
       if (isHTML) {
+        let jwtForInject = "";
+        if (shouldInjectJwt(path)) {
+          jwtForInject = sanitizeJwt(readRequestCookie(request, "nz-jwt"));
+        }
+
         let html = await response.text();
+        html = html.replace(/<head([^>]*)>/i, `<head$1>${buildWsInjectScript(jwtForInject)}`);
 
-        // 注入 WS 重定向脚本（所有 HTML 页面都需要）
-        html = html.replace(/<head([^>]*)>/i, `<head$1>${WS_INJECT_SCRIPT}`);
-
-        // Dashboard 页面还需要替换 agent 安装脚本 URL
         if (shouldRewriteAgentInstallCommand(path, contentType)) {
           html = rewriteAgentInstallCommand(html);
         }
@@ -194,6 +266,7 @@ export default {
         newHeaders.delete("Content-Length");
         newHeaders.delete("Content-Encoding");
         newHeaders.set("Content-Type", "text/html; charset=utf-8");
+        applyNoStore(newHeaders);
 
         return new Response(html, {
           status: response.status,
@@ -202,8 +275,7 @@ export default {
         });
       }
 
-      // 非 HTML 文本响应（JSON 等）：替换 agent 安装脚本 URL
-      if (!isHTML && shouldRewriteAgentInstallCommand(path, contentType)) {
+      if (shouldRewriteAgentInstallCommand(path, contentType)) {
         const responseText = await response.text();
         const rewrittenBody = rewriteAgentInstallCommand(responseText);
         newHeaders.delete("Content-Length");
@@ -215,38 +287,56 @@ export default {
         });
       }
 
-      // 其他响应直接透传
-      const responseBody = await response.arrayBuffer();
-
-      return new Response(responseBody, {
+      return new Response(response.body, {
         status: response.status,
         statusText: response.statusText,
         headers: newHeaders,
       });
     } catch (error) {
-      console.log(`[Snippet] Error: ${error.message}`);
-      return new Response(JSON.stringify({
-        status: "error",
-        message: `Proxy error: ${error.message}`
-      }), {
-        status: 502,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
+      return new Response(
+        JSON.stringify({
+          status: "error",
+          message: `Proxy error: ${error.message}`,
+        }),
+        {
+          status: 502,
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-store",
+          },
         }
-      });
+      );
     }
   },
 };
 
+function applyNoStore(headers) {
+  headers.set("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+}
+
 /**
- * 改写 Set-Cookie 中 nz-jwt 的 Domain
- *
- * 上游返回: Set-Cookie: nz-jwt=xxx; Path=/; HttpOnly; Secure; SameSite=Lax
- * 改写为:   Set-Cookie: nz-jwt=xxx; Path=/; HttpOnly; Secure; SameSite=None; Domain=.{host}
- *
- * Domain=.{host} 使 cookie 对 ws.{host} 也生效
- * SameSite 从 Lax 改为 None（跨子域名 WS 需要）
+ * 解析是否需要给 cookie 扩 Domain（仅同父域跨 host WS 时）。
+ * 单域名 / 跨注册域 → 返回 null。
+ */
+function resolveCookieDomain(requestHost, wsPublicHost) {
+  const forced = (COOKIE_DOMAIN || "").trim();
+  if (forced) return forced.startsWith(".") ? forced : `.${forced}`;
+
+  const host = (requestHost || "").toLowerCase();
+  const wsHost = (wsPublicHost || "").toLowerCase();
+  if (!host) return null;
+  if (!wsHost || wsHost === host) return null;
+  if (wsHost.endsWith("." + host)) return "." + host;
+  return null;
+}
+
+/**
+ * 改写 Set-Cookie：
+ * - 始终尽量补 Secure（反代后上游常是 HTTP）
+ * - 仅同父域跨 host 时给 nz-jwt 加 Domain + SameSite=None
  */
 function rewriteCookieDomain(response, newHeaders, host) {
   const cookies = response.headers.getAll
@@ -255,57 +345,51 @@ function rewriteCookieDomain(response, newHeaders, host) {
 
   if (!cookies.length) return;
 
-  // 清除原有 Set-Cookie（newHeaders 从 response.headers 复制过来的）
+  const domain = resolveCookieDomain(host, WS_PUBLIC_HOST);
   newHeaders.delete("Set-Cookie");
 
   for (const cookie of cookies) {
-    if (cookie.includes("nz-jwt")) {
-      // 加 Domain，SameSite 改为 None（跨子域 WS 需要 Secure + SameSite=None）
-      // Chrome 要求 SameSite=None 必须搭配 Secure，否则 cookie 被静默丢弃
-      let rewritten = cookie
-        .replace(/;\s*SameSite=\w+/i, "; SameSite=None")
-        .replace(/;\s*Domain=[^;]*/i, ""); // 先删掉已有的 Domain（如果有）
-      if (!/;\s*Secure/i.test(rewritten)) {
-        rewritten += "; Secure";
-      }
-      rewritten += `; Domain=.${host}`;
-      newHeaders.append("Set-Cookie", rewritten);
-    } else {
-      // 其他 cookie（如 nz-csrf）：后端在反代后面看到 HTTP，不会加 Secure；
-      // 浏览器在 HTTPS 页面上收到无 Secure 的 cookie 可能拒绝存储（Chrome 严格模式）
-      let rewritten = cookie;
-      if (!/;\s*Secure/i.test(rewritten)) {
-        rewritten += "; Secure";
-      }
-      newHeaders.append("Set-Cookie", rewritten);
+    let rewritten = cookie;
+    if (!/;\s*Secure/i.test(rewritten)) {
+      rewritten += "; Secure";
     }
+
+    if (domain && cookie.includes("nz-jwt")) {
+      rewritten = rewritten
+        .replace(/;\s*SameSite=\w+/i, "; SameSite=None")
+        .replace(/;\s*Domain=[^;]*/i, "");
+      if (!/;\s*SameSite=/i.test(rewritten)) {
+        rewritten += "; SameSite=None";
+      }
+      rewritten += `; Domain=${domain}`;
+    }
+
+    newHeaders.append("Set-Cookie", rewritten);
   }
 }
 
-/**
- * 判断响应是否可能包含 Dashboard 复制的 agent 安装命令
- */
 function shouldRewriteAgentInstallCommand(path, contentType) {
-  const isTextResponse = /text\/html|application\/javascript|text\/javascript|application\/json|text\/plain/i.test(contentType);
-  return isTextResponse && (path.startsWith('/dashboard/') || path === '/dashboard' || path === '/api/v1/setting');
-}
-
-/**
- * 替换上游 agent 安装脚本地址
- */
-function rewriteAgentInstallCommand(body) {
-  return UPSTREAM_AGENT_INSTALL_PATTERNS.reduce(
-    (text, pattern) => text.replace(pattern, AGENT_INSTALL_SCRIPT_URL),
-    body,
+  const isTextResponse =
+    /text\/html|application\/javascript|text\/javascript|application\/json|text\/plain/i.test(
+      contentType
+    );
+  return (
+    isTextResponse &&
+    (path.startsWith("/dashboard/") || path === "/dashboard" || path === "/api/v1/setting")
   );
 }
 
-/**
- * 判断是否是 SPA 路由（非 API 且非静态资源）
- */
+function rewriteAgentInstallCommand(body) {
+  return UPSTREAM_AGENT_INSTALL_PATTERNS.reduce(
+    (text, pattern) => text.replace(pattern, AGENT_INSTALL_SCRIPT_URL),
+    body
+  );
+}
+
 function isSPARoute(path) {
-  const isApiPath = path.startsWith('/api/');
-  const isStaticAsset = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map|json|webp|avif)$/i.test(path);
-  const isSpecialPath = path === '/favicon.ico' || path === '/manifest.json';
-  return !isApiPath && !isStaticAsset && !isSpecialPath;
+  if (path.startsWith("/api/")) return false;
+  if (/\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map|json|webp|avif)$/i.test(path))
+    return false;
+  if (path === "/favicon.ico" || path === "/manifest.json") return false;
+  return true;
 }
