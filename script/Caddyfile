@@ -1,13 +1,12 @@
 # Caddy :8009 (Choreo WS) → Nezha :8008 / grpc-ws-tunnel :8010
 #
-# 模式一（Snippet-only）原生穿透时，path 可能仍带网关前缀：
+# 模式一 Snippet-only 原生穿透时，path 可能仍带网关前缀：
 #   /default/nezha/nezha_ws/v1.0/grpc-tunnel
 #   /default/nezha/nezha_ws/v1.0/api/...
 # 也可能已被网关剥掉。两种都要认。
 #
-# 多域名终端/文件 WS:
-#   Snippet 注入 Nezha 原生 ?token=...（jwt TokenLookup 已支持 query: token）
-#   无需再把 query 转 Cookie；下方保留 nz_jwt 兼容旧注入
+# 多域名终端/文件 WS：Snippet 注入 Nezha 原生 ?token=...
+# （TokenLookup = header / query: token / cookie: nz-jwt）
 
 {
 	auto_https off
@@ -19,32 +18,7 @@
 	@ws_prefixed path_regexp ws_pref ^/default/nezha/nezha_ws/v1\.0(/.*)$
 	rewrite @ws_prefixed {re.ws_pref.1}
 
-	# 2) 兼容旧注入 ?nz_jwt= → Cookie（新 Snippet 已改用 ?token=）
-	@term_jwt {
-		path_regexp term ^/api/v1/ws/terminal/([^/]+)/?$
-		query nz_jwt=*
-	}
-	handle @term_jwt {
-		reverse_proxy 127.0.0.1:8008 {
-			header_up Host {http.reverse_proxy.upstream.hostport}
-			header_up Cookie "nz-jwt={query.nz_jwt}"
-			header_up -Origin
-		}
-	}
-
-	@file_jwt {
-		path_regexp file ^/api/v1/ws/file/([^/]+)/?$
-		query nz_jwt=*
-	}
-	handle @file_jwt {
-		reverse_proxy 127.0.0.1:8008 {
-			header_up Host {http.reverse_proxy.upstream.hostport}
-			header_up Cookie "nz-jwt={query.nz_jwt}"
-			header_up -Origin
-		}
-	}
-
-	# 3) 外部 patched Agent：gRPC-over-WebSocket 隧道
+	# 2) 外部 patched Agent：gRPC-over-WebSocket 隧道
 	@grpcTunnel path /grpc-tunnel
 	handle @grpcTunnel {
 		reverse_proxy 127.0.0.1:8010 {
@@ -52,7 +26,7 @@
 		}
 	}
 
-	# 4) 前端 WebSocket 等 → Dashboard（含 ?token= 原生鉴权）
+	# 3) 前端 WebSocket 等 → Dashboard
 	handle {
 		reverse_proxy 127.0.0.1:8008 {
 			header_up Host {http.reverse_proxy.upstream.hostport}
