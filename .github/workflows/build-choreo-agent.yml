@@ -136,7 +136,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git add cmd/agent/main.go model/config.go go.mod go.sum .goreleaser.yml
+          git add \
+            cmd/agent/connection_config.go \
+            cmd/agent/main.go \
+            cmd/agent/runtime_config_consumers.go \
+            model/config.go \
+            go.mod go.sum .goreleaser.yml
           git commit -m "Apply Choreo agent patch for ${CHOREO_TAG}"
           git tag -f "$CHOREO_TAG"
 
