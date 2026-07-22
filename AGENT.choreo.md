@@ -16,7 +16,16 @@ Patch 做两件事：
 - `server` 支持 `ws://` / `wss://`：agent 仍使用原生 gRPC API，但底层 transport 走 WebSocket `net.Conn`。
 - 自动更新默认改为检查 `smgc-cc/choreo-nezha` release，避免自定义 agent 被官方 release 覆盖。
 
-## 模式一（推荐）：Snippet
+针对上游 `v2.3.0+` 的连接/配置重构，脚本改动点是：
+
+| 文件 | 改动 |
+|---|---|
+| `cmd/agent/connection_config.go` | 新增 `connectionConfigTuple.newClient()`：`ws://`/`wss://` 走 websocket dialer，其余走原 `dialOptions()` |
+| `cmd/agent/main.go` | `grpc.NewClient(...dialOptions()...)` → `connectionConfig.newClient()`；`doSelfUpdate` 优先 `update_repo` |
+| `cmd/agent/runtime_config_consumers.go` | `updateConfigTuple` 增加 `updateRepo` 字段 |
+| `model/config.go` | `AgentConfig` 增加 `UpdateRepo`（`NZ_UPDATE_REPO` / `update_repo`） |
+
+## 模式一（推荐）：长路径 + Snippet（无 Worker）
 
 面板域名与 Choreo 自定义域为 **同一主机**，WS 原生穿透：
 
