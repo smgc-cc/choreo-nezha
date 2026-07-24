@@ -1,33 +1,40 @@
-diff --git a/cmd/agent/connection_config.go b/cmd/agent/connection_config.go
---- a/cmd/agent/connection_config.go
-+++ b/cmd/agent/connection_config.go
-@@ -1,12 +1,17 @@
+--- a/cmd/agent/connection_config.go	2026-07-24 10:52:04
++++ b/cmd/agent/connection_config.go	2026-07-24 10:52:04
+@@ -1,12 +1,18 @@
  package main
-
+ 
  import (
 +	"context"
  	"crypto/tls"
 +	"net"
 +	"strings"
-
++	"time"
+ 
 +	"github.com/coder/websocket"
  	"github.com/nezhahq/agent/model"
  	"google.golang.org/grpc"
  	"google.golang.org/grpc/credentials"
  	"google.golang.org/grpc/credentials/insecure"
++	"google.golang.org/grpc/keepalive"
  )
-
+ 
  type connectionConfigTuple struct {
- 	Server      string
-@@ -28,6 +33,28 @@ func loadConnectionConfigTuple() connectionConfigTuple {
+@@ -28,6 +34,50 @@
  	}
  }
-
+ 
 +func (c connectionConfigTuple) newClient() (*grpc.ClientConn, error) {
 +	if strings.HasPrefix(c.Server, "ws://") || strings.HasPrefix(c.Server, "wss://") {
 +		return grpc.NewClient(
 +			"passthrough:///nezha-ws-tunnel",
 +			grpc.WithTransportCredentials(insecure.NewCredentials()),
++			// Detect dead tunnels quickly; Cloudflare/Choreo may drop idle WS
++			// without a clean close the agent can observe.
++			grpc.WithKeepaliveParams(keepalive.ClientParameters{
++				Time:                20 * time.Second,
++				Timeout:             10 * time.Second,
++				PermitWithoutStream: true,
++			}),
 +			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 +				wsConn, _, err := websocket.Dial(ctx, c.Server, &websocket.DialOptions{
 +					CompressionMode: websocket.CompressionDisabled,
@@ -35,6 +42,9 @@ diff --git a/cmd/agent/connection_config.go b/cmd/agent/connection_config.go
 +				if err != nil {
 +					return nil, err
 +				}
++				// WebSocket ping unblocks half-open connections so the outer
++				// reconnect loop can run without a process restart.
++				go keepWebSocketAlive(wsConn)
 +				return websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary), nil
 +			}),
 +			grpc.WithPerRPCCredentials(c.Auth),
@@ -43,14 +53,27 @@ diff --git a/cmd/agent/connection_config.go b/cmd/agent/connection_config.go
 +	return grpc.NewClient(c.Server, c.dialOptions()...)
 +}
 +
++func keepWebSocketAlive(wsConn *websocket.Conn) {
++	ticker := time.NewTicker(25 * time.Second)
++	defer ticker.Stop()
++	for range ticker.C {
++		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++		err := wsConn.Ping(ctx)
++		cancel()
++		if err != nil {
++			_ = wsConn.Close(websocket.StatusGoingAway, "ping failed")
++			return
++		}
++	}
++}
++
  func (c connectionConfigTuple) dialOptions() []grpc.DialOption {
  	var securityOption grpc.DialOption
  	if c.TLS {
-diff --git a/cmd/agent/main.go b/cmd/agent/main.go
---- a/cmd/agent/main.go
-+++ b/cmd/agent/main.go
-@@ -265,7 +265,7 @@ func run() {
-
+--- a/cmd/agent/main.go	2026-07-24 10:52:04
++++ b/cmd/agent/main.go	2026-07-24 10:52:04
+@@ -265,7 +265,7 @@
+ 
  	for {
  		connectionConfig := loadConnectionConfigTuple()
 -		conn, err = grpc.NewClient(connectionConfig.Server, connectionConfig.dialOptions()...)
@@ -58,8 +81,8 @@ diff --git a/cmd/agent/main.go b/cmd/agent/main.go
  		if err != nil {
  			printf("与面板建立连接失败: %v", err)
  			retry()
-@@ -607,6 +607,21 @@ func doSelfUpdate(config updateConfigTuple, useLocalVersion bool) (exit bool) {
-
+@@ -606,7 +606,20 @@
+ 
  	printf("检查更新: %v", v)
  	var latest *selfupdate.Release
 +	updateRepo := strings.TrimSpace(config.updateRepo)
@@ -79,29 +102,27 @@ diff --git a/cmd/agent/main.go b/cmd/agent/main.go
  	case config.useGiteeToUpgrade:
  		updater, erru := selfupdate.NewGiteeUpdater(selfupdate.Config{
  			BinaryName: binaryName,
-diff --git a/cmd/agent/runtime_config_consumers.go b/cmd/agent/runtime_config_consumers.go
---- a/cmd/agent/runtime_config_consumers.go
-+++ b/cmd/agent/runtime_config_consumers.go
-@@ -37,6 +37,7 @@ type taskFeatureGates struct {
+--- a/cmd/agent/runtime_config_consumers.go	2026-07-24 10:52:04
++++ b/cmd/agent/runtime_config_consumers.go	2026-07-24 10:52:04
+@@ -37,6 +37,7 @@
  type updateConfigTuple struct {
  	useAtomGitToUpgrade bool
  	useGiteeToUpgrade   bool
 +	updateRepo          string
  }
-
+ 
  type startupConfigView struct {
-@@ -85,6 +86,7 @@ func updateConfigTupleFrom(config *model.AgentConfig) updateConfigTuple {
+@@ -85,6 +86,7 @@
  	return updateConfigTuple{
  		useAtomGitToUpgrade: config.UseAtomGitToUpgrade,
  		useGiteeToUpgrade:   config.UseGiteeToUpgrade,
 +		updateRepo:          config.UpdateRepo,
  	}
  }
-
-diff --git a/model/config.go b/model/config.go
---- a/model/config.go
-+++ b/model/config.go
-@@ -41,6 +41,7 @@ type AgentConfig struct {
+ 
+--- a/model/config.go	2026-07-24 10:52:04
++++ b/model/config.go	2026-07-24 10:52:04
+@@ -41,6 +41,7 @@
  	UseIPv6CountryCode          bool            `koanf:"use_ipv6_country_code" json:"use_ipv6_country_code"`     // 默认优先展示IPv6旗帜
  	UseGiteeToUpgrade           bool            `koanf:"use_gitee_to_upgrade" json:"use_gitee_to_upgrade"`       // 强制从Gitee获取更新
  	UseAtomGitToUpgrade         bool            `koanf:"use_atomgit_to_upgrade" json:"use_atomgit_to_upgrade"`   // 强制从AtomGit获取更新

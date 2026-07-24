@@ -11,8 +11,10 @@
 
 两套边缘方案：
 
-1. **模式一（推荐）**：Cloudflare Snippet + 原生 WS 穿透
+1. **模式一（推荐）**：Cloudflare Snippet + 原生 WS 穿透（**无 Worker**）
 2. **模式二（备选）**：全流量 Cloudflare Worker
+
+默认按 **单域名** 描述。多域名仅见文末附录。
 
 ## 主要特性
 
@@ -28,9 +30,9 @@
 
 ---
 
-## 模式一：Snippet（推荐）
+## 模式一：Snippet（推荐，无 Worker）
 
-### 架构
+### 架构（单域名）
 
 ```text
 nezha.example.com（本 zone 橙云 + Choreo 自定义域）
@@ -115,7 +117,7 @@ curl -L https://raw.githubusercontent.com/smgc-cc/choreo-nezha/main/agent/instal
     ./agent.sh
 ```
 
-### 验证
+### 验证（单域名）
 
 ```bash
 # 注入（应看到 WebSocket 脚本与 nezha_ws 前缀）
@@ -148,13 +150,14 @@ nezha.example.com（Worker 自定义域）
 
 ### 何时用
 
-- 没有 Snippet
+- 没有 Snippet / 不想维护路径注入
 - 可接受 Workers **日请求额度**（页面、静态资源也计次）
 
 ### 部署
 
 1. Create Worker，粘贴 `_worker_standalone.js`，改 `CHOREO_ORIGIN` / 前缀
 2. 绑定自定义域名
+3. **不要**再对同一域名挂 Snippet
 
 ### Agent
 
@@ -241,7 +244,7 @@ https://xxxx-dev.e1-us-east-azure.choreoapis.dev/default/nezha/v1.0
 choreo-nezha/
 ├── Dockerfile
 ├── worker/
-│   ├── _snippet.js                   # 模式一 Snippet（推荐）
+│   ├── _snippet.js                   # 模式一 Snippet（推荐，无 Worker）
 │   └── _worker_standalone.js         # 模式二 全流量 Worker
 ├── .choreo/
 │   └── component.yaml
@@ -587,6 +590,7 @@ tls: false
 
 | | 模式一 Snippet | 模式二 Worker |
 |---|---|---|
+| 域名 | 通常 **单域名** | 通常 **单域名** |
 | Agent `server` | **长** `wss://.../nezha_ws/v1.0/grpc-tunnel` | **短** `wss://.../grpc-tunnel` |
 | 边缘费用 | HTTP≈免费；WS 穿透 | 全流量计 Workers |
 | 终端 cookie | 同源 host-only | 同源 Cookie |
@@ -594,21 +598,21 @@ tls: false
 
 ---
 
-## 附录：Snippets 多域名特例（可选，非必须）
+## 附录：多域名特例（可选，非必须）
 
-仅当 **面板入口域名** 与 **Choreo 绑定域名** 不是同一个时使用（例如品牌域经 SaaS、snippets 基建域在另一 zone）。
+仅当 **面板入口域名** 与 **Choreo 绑定域名** 不是同一个时使用（例如品牌域经 SaaS、基建域在另一 zone）。
 
 示例（与本仓库线上一致时可对照）：
 
 | 角色 | 主机 |
 |---|---|
-| 浏览器入口（Snippet） | `nezha.example.com` |
-| Choreo 绑定 + Agent + WS 穿透 | `nezha.snippet.com` |
+| 浏览器入口（Snippet） | `status.sfun.cc` |
+| Choreo 绑定 + Agent + WS 穿透 | `nezha.chatsfun.nyc.mn` |
 
 Snippet：
 
 ```javascript
-const WS_PUBLIC_HOST = "nezha.snippet.com"; // 浏览器 WS 改到基建域
+const WS_PUBLIC_HOST = "nezha.chatsfun.nyc.mn"; // 浏览器 WS 改到基建域
 const COOKIE_DOMAIN = ""; // 跨注册域无法共享 cookie，保持空
 ```
 
@@ -620,7 +624,7 @@ const COOKIE_DOMAIN = ""; // 跨注册域无法共享 cookie，保持空
 - 终端 / 文件管理 WS：Snippet 仅在 `/dashboard/terminal*` 等页注入，并用 Nezha 原生 `?token=`（`TokenLookup` 已支持）
 - HTML 带 `Cache-Control: no-store`
 - Agent 建议：  
-  `server: wss://nezha.snippet.com/default/nezha/nezha_ws/v1.0/grpc-tunnel`
+  `server: wss://nezha.chatsfun.nyc.mn/default/nezha/nezha_ws/v1.0/grpc-tunnel`
 - 日常从入口域登录并打开终端；勿在未登录的基建域直接开终端页
 
 故障对照：
@@ -631,6 +635,7 @@ const COOKIE_DOMAIN = ""; // 跨注册域无法共享 cookie，保持空
 | 打开终端立刻 Session completed | WS 到基建域无登录态：需多域名 Snippet 注入 `?token=`；或会话因 **IP 绑定**失败（JWT session 绑定登录时 RealIP） |
 | 入口域裸 WS 530 | 正常：入口域未绑 Choreo，WS 必须走 `WS_PUBLIC_HOST` |
 | Agent 在线但终端不行 | Agent 走 `/grpc-tunnel` 不依赖浏览器 cookie；终端 WS 要鉴权 |
+| Agent 掉线后不重连，重启又好 | 多为边缘静默掐断 WS 导致半开连接；需更新 **patched agent**（WS ping + gRPC keepalive）并重新部署含新 `grpc-ws-tunnel` 的镜像 |
 
 **默认部署不必多域名。** 能单域名绑 Choreo 时，优先单域名（`WS_PUBLIC_HOST = ""`），无需 `?token=` query。
 
