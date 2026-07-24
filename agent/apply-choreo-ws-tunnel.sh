@@ -149,6 +149,18 @@ if new_newclient not in text:
         )
     text = text.replace(old_newclient, new_newclient, 1)
 
+# Faster reconnect on Choreo/Cloudflare tunnel drops (upstream default is 10s).
+# Keep a small pause so we don't tight-loop hammer the endpoint on hard outages.
+old_delay = 'delayWhenError = time.Second * 10 // Agent 重连间隔'
+new_delay = 'delayWhenError = time.Second * 2 // Agent 重连间隔（Choreo WS 隧道缩短）'
+if new_delay not in text:
+    if old_delay not in text:
+        # tolerate already-custom values that still look like the constant
+        if 'delayWhenError = time.Second *' not in text:
+            raise SystemExit('cannot find delayWhenError constant in main.go')
+    else:
+        text = text.replace(old_delay, new_delay, 1)
+
 # Self-update: prefer custom UpdateRepo (default smgc-cc/choreo-nezha).
 old_update = '''\tprintf("检查更新: %v", v)\n\tvar latest *selfupdate.Release\n\tswitch {\n'''
 new_update = '''\tprintf("检查更新: %v", v)\n\tvar latest *selfupdate.Release\n\tupdateRepo := strings.TrimSpace(config.updateRepo)\n\tif updateRepo == "" {\n\t\tupdateRepo = "smgc-cc/choreo-nezha"\n\t}\n\tswitch {\n\tcase updateRepo != "":\n\t\tupdater, erru := selfupdate.NewUpdater(selfupdate.Config{\n\t\t\tBinaryName: binaryName,\n\t\t})\n\t\tif erru != nil {\n\t\t\tprintf("更新失败: %v", erru)\n\t\t\treturn\n\t\t}\n\t\tlatest, err = updater.UpdateSelf(v, updateRepo)\n'''
@@ -229,6 +241,7 @@ grep -q 'websocket.Dial(ctx, c.Server' cmd/agent/connection_config.go
 grep -q 'keepWebSocketAlive' cmd/agent/connection_config.go
 grep -q 'grpc.WithKeepaliveParams' cmd/agent/connection_config.go
 grep -q 'conn, err = connectionConfig.newClient()' cmd/agent/main.go
+grep -q 'delayWhenError = time.Second \* 2' cmd/agent/main.go
 grep -q 'updateRepo := strings.TrimSpace(config.updateRepo)' cmd/agent/main.go
 grep -q 'UpdateSelf(v, updateRepo)' cmd/agent/main.go
 grep -q 'updateRepo' cmd/agent/runtime_config_consumers.go

@@ -14,7 +14,8 @@
 Patch 做这些事：
 
 - `server` 支持 `ws://` / `wss://`：agent 仍使用原生 gRPC API，但底层 transport 走 WebSocket `net.Conn`。
-- **防半开连接**：WS 层定时 `Ping`（约 25s）+ gRPC client keepalive（20s/10s）。Cloudflare / Choreo 静默掐断空闲 WS 时，能让 stream 出错并进入上游自带的重连循环（`delayWhenError = 10s`），避免「掉线后卡死、只能重启 agent」。
+- **防半开连接**：WS 层定时 `Ping`（约 25s）+ gRPC client keepalive（20s/10s）。Cloudflare / Choreo 静默掐断空闲 WS 时，能让 stream 出错并进入上游自带的重连循环，避免「掉线后卡死、只能重启 agent」。
+- **更快重连**：`delayWhenError` 从上游默认 `10s` 改为 `2s`（断线感知后约 2 秒开始 `Try to reconnect`）。
 - 自动更新默认改为检查 `smgc-cc/choreo-nezha` release，避免自定义 agent 被官方 release 覆盖。
 
 服务端 `agent/grpc-ws-tunnel.go` 同样对入站隧道做 WS ping，并在单向 `io.Copy` 结束后关闭两端。
@@ -24,7 +25,7 @@ Patch 做这些事：
 | 文件 | 改动 |
 |---|---|
 | `cmd/agent/connection_config.go` | 新增 `newClient()`：`ws://`/`wss://` 走 websocket dialer + keepalive + ping；其余走原 `dialOptions()` |
-| `cmd/agent/main.go` | `grpc.NewClient(...dialOptions()...)` → `connectionConfig.newClient()`；`doSelfUpdate` 优先 `update_repo` |
+| `cmd/agent/main.go` | `grpc.NewClient(...dialOptions()...)` → `connectionConfig.newClient()`；`delayWhenError` `10s→2s`；`doSelfUpdate` 优先 `update_repo` |
 | `cmd/agent/runtime_config_consumers.go` | `updateConfigTuple` 增加 `updateRepo` 字段 |
 | `model/config.go` | `AgentConfig` 增加 `UpdateRepo`（`NZ_UPDATE_REPO` / `update_repo`） |
 

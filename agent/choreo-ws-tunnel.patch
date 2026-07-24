@@ -1,5 +1,5 @@
---- a/cmd/agent/connection_config.go	2026-07-24 10:52:04
-+++ b/cmd/agent/connection_config.go	2026-07-24 10:52:04
+--- a/cmd/agent/connection_config.go	2026-07-24 14:20:32
++++ b/cmd/agent/connection_config.go	2026-07-24 14:20:32
 @@ -1,12 +1,18 @@
  package main
  
@@ -70,8 +70,17 @@
  func (c connectionConfigTuple) dialOptions() []grpc.DialOption {
  	var securityOption grpc.DialOption
  	if c.TLS {
---- a/cmd/agent/main.go	2026-07-24 10:52:04
-+++ b/cmd/agent/main.go	2026-07-24 10:52:04
+--- a/cmd/agent/main.go	2026-07-24 14:20:32
++++ b/cmd/agent/main.go	2026-07-24 14:20:32
+@@ -84,7 +84,7 @@
+ )
+ 
+ const (
+-	delayWhenError = time.Second * 10 // Agent 重连间隔
++	delayWhenError = time.Second * 2 // Agent 重连间隔（Choreo WS 隧道缩短）
+ 
+ 	minUpdateInterval = 1440
+ 	maxUpdateInterval = 2880
 @@ -265,7 +265,7 @@
  
  	for {
@@ -102,8 +111,8 @@
  	case config.useGiteeToUpgrade:
  		updater, erru := selfupdate.NewGiteeUpdater(selfupdate.Config{
  			BinaryName: binaryName,
---- a/cmd/agent/runtime_config_consumers.go	2026-07-24 10:52:04
-+++ b/cmd/agent/runtime_config_consumers.go	2026-07-24 10:52:04
+--- a/cmd/agent/runtime_config_consumers.go	2026-07-24 14:20:32
++++ b/cmd/agent/runtime_config_consumers.go	2026-07-24 14:20:32
 @@ -37,6 +37,7 @@
  type updateConfigTuple struct {
  	useAtomGitToUpgrade bool
@@ -120,8 +129,8 @@
  	}
  }
  
---- a/model/config.go	2026-07-24 10:52:04
-+++ b/model/config.go	2026-07-24 10:52:04
+--- a/model/config.go	2026-07-24 14:20:32
++++ b/model/config.go	2026-07-24 14:20:32
 @@ -41,6 +41,7 @@
  	UseIPv6CountryCode          bool            `koanf:"use_ipv6_country_code" json:"use_ipv6_country_code"`     // 默认优先展示IPv6旗帜
  	UseGiteeToUpgrade           bool            `koanf:"use_gitee_to_upgrade" json:"use_gitee_to_upgrade"`       // 强制从Gitee获取更新
