@@ -12,48 +12,92 @@ conn_cfg = Path('cmd/agent/connection_config.go')
 text = conn_cfg.read_text()
 
 # Expand imports for websocket dialer + keepalive.
-if '"github.com/coder/websocket"' not in text:
-    old_import = '''import (
-	"crypto/tls"
+# Inject path-by-path so upstream CodeQL/logging tweaks (e.g. extra "log")
+# do not break the exact-block match used by older scripts.
+def ensure_go_imports(src: str, paths: list[str]) -> str:
+    """Insert any missing import paths into the first import (...) block.
 
-	"github.com/nezhahq/agent/model"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
-)'''
-    new_import = '''import (
-	"context"
-	"crypto/tls"
-	"net"
-	"strings"
-	"time"
-
-	"github.com/coder/websocket"
-	"github.com/nezhahq/agent/model"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
-)'''
-    if old_import not in text:
+    Stdlib paths (no dot in first path segment) go with other stdlib imports;
+    third-party paths go after the blank line that separates them. If the
+    import block is missing entirely, raise so the failure is explicit.
+    """
+    m = re.search(r'(?ms)^import \(\n(.*?)^\)\n', src)
+    if not m:
         raise SystemExit('cannot find connection_config.go import block')
-    text = text.replace(old_import, new_import, 1)
-else:
-    # Upgrade an older choreo patch that already had websocket but no keepalive/time.
-    if '"google.golang.org/grpc/keepalive"' not in text:
-        text = text.replace(
-            '"google.golang.org/grpc/credentials/insecure"\n)',
-            '"google.golang.org/grpc/credentials/insecure"\n\t"google.golang.org/grpc/keepalive"\n)',
-            1,
-        )
-    if '\t"time"\n' not in text and not re.search(r'(?m)^\t"time"$', text):
-        # insert time with other stdlib imports if missing
-        if '"time"' not in text:
-            text = text.replace(
-                '"strings"\n',
-                '"strings"\n\t"time"\n',
-                1,
-            )
+
+    body = m.group(1)
+    existing = set(re.findall(r'"([^"]+)"', body))
+    missing = [p for p in paths if p not in existing]
+    if not missing:
+        return src
+
+    stdlib = []
+    third = []
+    for p in missing:
+        # stdlib: single segment or no domain-looking first segment
+        first = p.split('/')[0]
+        if '.' not in first:
+            stdlib.append(p)
+        else:
+            third.append(p)
+
+    lines = body.splitlines(keepends=True)
+    # Drop trailing blank lines inside the block; we'll re-add separators.
+    while lines and lines[-1].strip() == '':
+        lines.pop()
+
+    # Partition existing lines into stdlib / blank / third-party.
+    std_lines, third_lines = [], []
+    seen_blank = False
+    for line in lines:
+        if line.strip() == '':
+            seen_blank = True
+            continue
+        if not seen_blank and '"' in line:
+            # Heuristic: before first blank = stdlib group (may already mix on
+            # some files; still append new stdlib there).
+            path_m = re.search(r'"([^"]+)"', line)
+            if path_m and '.' not in path_m.group(1).split('/')[0]:
+                std_lines.append(line)
+            else:
+                # Already mixed / third-party appeared before blank.
+                third_lines.append(line)
+                seen_blank = True
+        else:
+            third_lines.append(line)
+
+    for p in sorted(stdlib):
+        std_lines.append(f'\t"{p}"\n')
+    for p in sorted(third):
+        third_lines.append(f'\t"{p}"\n')
+
+    # Stable-ish sort within each group by the quoted path.
+    def sort_key(line: str) -> str:
+        pm = re.search(r'"([^"]+)"', line)
+        return pm.group(1) if pm else line
+
+    std_lines = sorted(set(std_lines), key=sort_key)
+    third_lines = sorted(set(third_lines), key=sort_key)
+
+    new_body = ''.join(std_lines)
+    if std_lines and third_lines:
+        new_body += '\n'
+    new_body += ''.join(third_lines)
+
+    return src[: m.start(1)] + new_body + src[m.end(1) :]
+
+
+text = ensure_go_imports(
+    text,
+    [
+        'context',
+        'net',
+        'strings',
+        'time',
+        'github.com/coder/websocket',
+        'google.golang.org/grpc/keepalive',
+    ],
+)
 
 # Inject newClient() helper that supports ws:// / wss:// transport + keepalive.
 helper = '''
