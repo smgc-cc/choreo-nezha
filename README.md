@@ -2,8 +2,8 @@
 
 # Version
 
-v2.3.8
+v2.3.11
 
 # Releases
 
-**Full Changelog**: https://github.com/nezhahq/nezha/compare/v2.3.7...v2.3.8
+**Full Changelog**: https://github.com/nezhahq/nezha/compare/v2.3.10...v2.3.11
